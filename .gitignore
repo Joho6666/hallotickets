@@ -54,3 +54,6 @@ mobile/tmp_*.xml
 
 # Internal R&D PM workspace (not for public consumption)
 reference/
+
+# Local, non-committed Claude Code project memory (auto-loaded; overrides/augments CLAUDE.md)
+CLAUDE.local.md
