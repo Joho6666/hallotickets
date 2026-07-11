@@ -18,9 +18,15 @@ from uiautomator2.exceptions import ConnectError
 try:
     from mobile.config import (
         CONFIG_OVERRIDE_ENV_VAR,
+        PLACEHOLDER_LITERALS,
         Config,
+        filter_known_config_keys,
         load_config_dict,
+        migrate_deprecated_config,
         save_config_dict,
+        unknown_config_keys,
+        update_config_values,
+        validate_config_dict,
     )
     from mobile.damai_app import DamaiBot
     from mobile.logger import get_logger
@@ -33,9 +39,15 @@ try:
 except ImportError:
     from config import (
         CONFIG_OVERRIDE_ENV_VAR,
+        PLACEHOLDER_LITERALS,
         Config,
+        filter_known_config_keys,
         load_config_dict,
+        migrate_deprecated_config,
         save_config_dict,
+        unknown_config_keys,
+        update_config_values,
+        validate_config_dict,
     )
     from damai_app import DamaiBot
     from logger import get_logger
@@ -53,6 +65,9 @@ MODE_FLAGS = {
     "apply": {"probe_only": True, "if_commit_order": False, "execute": False},
     "probe": {"probe_only": True, "if_commit_order": False, "execute": True},
 }
+
+# U-06：写盘 diff 的缺键哨兵（区分「盘上没有该键」与「值恰好是 None」）
+_MISSING = object()
 
 _ANSI_RESET = "\033[0m"
 _ANSI_STYLES = {
@@ -213,6 +228,21 @@ def _auto_sync_device_config(base_config: dict, mode: str) -> tuple[dict, str | 
     )
     message = f"{prefix}: serial={updated_config.get('serial')}{suffix}"
     return updated_config, message
+
+
+def _reject_placeholder_serial(config_dict: dict):
+    """serial 在设备自动识别后仍是模板占位符 → 抢在 u2.connect 之前中文报错（U-05）。
+
+    模板 bootstrap 的占位符 serial 在单设备场景会被 _auto_sync_device_config
+    自动覆盖；走到这里仍是占位符说明 0 台或多台设备、无法自动识别。
+    """
+    serial = config_dict.get("serial")
+    if isinstance(serial, str) and serial.strip() in PLACEHOLDER_LITERALS["serial"]:
+        raise ValueError(
+            "serial 仍是模板占位符「你的设备序列号」，且未能自动识别唯一在线设备。\n"
+            "请先运行 adb devices 查看序列号并写入 mobile/config.jsonc，"
+            "或只连接一台设备后重试。"
+        )
 
 
 def _split_city_and_venue(venue_text: str) -> tuple[str | None, str]:
@@ -682,7 +712,11 @@ def _update_parse_result_post_discovery(parse_result, discovery: dict, chosen_pr
 
 
 def parse_args(argv=None):
-    parser = argparse.ArgumentParser(description="自然语言提示词驱动的大麦 mobile 流程")
+    # allow_abbrev=False：关闭前缀缩写匹配（--mod/--conf 等 typo 不再被静默接受，U-02）
+    parser = argparse.ArgumentParser(
+        description="自然语言提示词驱动的大麦 mobile 流程",
+        allow_abbrev=False,
+    )
     parser.add_argument(
         "prompt", help="例如：帮我抢一张 4 月 6 号张杰的演唱会门票，内场"
     )
@@ -746,6 +780,11 @@ def main(argv=None):
     bot = None
     try:
         base_config_dict = _load_base_config_dict(config_path)
+        # U-05：prompt 模式的模板 bootstrap 是合法起点（users/city/date/price
+        # 会被 prompt 解析结果覆盖）——占位符降级为警告，未知/废弃 key 照常提示。
+        validate_config_dict(base_config_dict, strict_placeholders=False)
+        # U-06：写盘 diff 基准 = 设备自动同步之前的盘上原状
+        on_disk_config_dict = dict(base_config_dict)
         try:
             parse_result = parse_prompt(args.prompt)
             intent = parse_result.intent
@@ -765,9 +804,13 @@ def main(argv=None):
         )
         if device_sync_message:
             logger.info(device_sync_message)
+        # U-05：自动识别失败后 serial 仍是占位符 → 中文报错，早于 u2.connect
+        _reject_placeholder_serial(base_config_dict)
         base_config = Config(
             **{
-                **Config.load_config(str(config_path)).to_dict(),
+                **Config.load_config(
+                    str(config_path), strict_placeholders=False
+                ).to_dict(),
                 "serial": base_config_dict.get("serial")
                 or base_config_dict.get("udid"),
             }
@@ -841,6 +884,22 @@ def main(argv=None):
             base_config_dict, intent, discovery, date_text, price_option, args.mode
         )
 
+        # U-05：废弃字段自动迁移（udid→serial 等），未知字段拒绝写盘
+        updated_config_dict, migrate_warnings = migrate_deprecated_config(
+            updated_config_dict
+        )
+        for migrate_warning in migrate_warnings:
+            logger.warning(migrate_warning)
+        unknown_keys = unknown_config_keys(updated_config_dict)
+        if unknown_keys:
+            _print_result(
+                False,
+                f"配置包含不支持的字段: {', '.join(unknown_keys)}。"
+                f"请对照 mobile/config.example.jsonc 修正 {config_path} 后重试；"
+                "本次未写入任何文件。",
+            )
+            return 1
+
         target_config = _config_path_description(config_path)
         if not args.yes and not _prompt_yes_no(
             f"确认将以上结果写入 {target_config} 吗？"
@@ -849,14 +908,24 @@ def main(argv=None):
             _print_result(False, "你已取消写入配置，本次没有修改任何文件。")
             return 1
 
-        save_config_dict(updated_config_dict, str(config_path))
+        # U-05：先构造 Config 再写盘——构造失败时盘上配置文件保持原样
+        next_config = Config(**filter_known_config_keys(updated_config_dict))
+
+        # U-06：只补丁相对盘上原状变化的键，注释保留 + 锁 + .bak 由
+        # update_config_values 统一负责（不再全量重写剥掉注释）
+        updates = {
+            key: value
+            for key, value in updated_config_dict.items()
+            if on_disk_config_dict.get(key, _MISSING) != value
+        }
+        update_config_values(updates, str(config_path))
         print(f"\n{_label('已更新配置:', stream=sys.stdout)} {target_config}")
 
         if not MODE_FLAGS[args.mode]["execute"]:
             _print_result(True, _success_detail_for_mode(args.mode, target_config))
             return 0
 
-        bot.config = Config(**updated_config_dict)
+        bot.config = next_config
         bot.item_detail = None
         # Reuse the already-confirmed page probe to skip a redundant re-probe and
         # activate fast_validation_hot_path (skips dismiss_startup_popups + session check).
@@ -868,7 +937,9 @@ def main(argv=None):
             failure_detail = "安全探测没有通过，请检查终端里的步骤日志后重试。"
             _print_result(False, failure_detail)
         return 0 if success else 1
-    except (ValueError, KeyError) as exc:
+    except (ValueError, KeyError, TypeError) as exc:
+        # TypeError：Config(**...) 构造期参数错误也走友好中文提示（U-05），
+        # 且因「先构造后写盘」，此时盘上配置文件保证未被修改。
         logger.error(str(exc))
         _print_result(
             False,

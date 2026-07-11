@@ -421,9 +421,13 @@ class EventNavigator:
 
         if clicked_title:
             if not detail_title:
-                # 详情页标题偶发未渲染读空：短重试一次再回落（对抗审查补充 3a）
-                time.sleep(0.3)
-                detail_title = bot._get_detail_title_text()
+                # 详情页标题异步渲染读空：延长轮询（真机实测单次 0.3s 重试不够，
+                # 慢网络下标题可持续读空数秒，误判 mismatch 会把正确条目拉黑）
+                for _ in range(6):
+                    time.sleep(0.35)
+                    detail_title = bot._get_detail_title_text()
+                    if detail_title:
+                        break
             if not detail_title:
                 # clicked_title 高分但详情标题为空：显式记录，不静默 False
                 log_event(
@@ -432,6 +436,31 @@ class EventNavigator:
                     level=logging.WARNING,
                     clicked_title=clicked_title,
                 )
+                # 兜底 1：场馆文案可读且与目标场馆一致 → 视为已验证。
+                target_venue = normalize_text(self._config.target_venue or "")
+                if target_venue:
+                    detail_venue = normalize_text(bot._get_detail_venue_text() or "")
+                    if detail_venue and (
+                        target_venue in detail_venue or detail_venue in target_venue
+                    ):
+                        log_event(
+                            logger,
+                            "detail_title_verified",
+                            match="venue_fallback",
+                            venue=detail_venue,
+                        )
+                        return True
+                # 兜底 2：标题「读不到」≠「不一致」。clicked_title 已经过搜索卡
+                # 评分 + 城市冲突否决筛选，此处 reject 会将正确条目加入黑名单
+                # 造成死循环（2026-07-11 真机实测）。带 WARNING 放行，错误页面
+                # 风险由下游 SKU 场次/票档匹配兜底。
+                log_event(
+                    logger,
+                    "detail_title_unverified_accept",
+                    level=logging.WARNING,
+                    clicked_title=clicked_title,
+                )
+                return True
             else:
                 normalized_clicked = normalize_text(clicked_title)
                 normalized_detail = normalize_text(detail_title)

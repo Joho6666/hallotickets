@@ -1,5 +1,7 @@
 """Unit tests for mobile/prompt_runner.py."""
 
+import contextlib
+import shutil
 import subprocess
 from pathlib import Path
 from unittest.mock import Mock, patch
@@ -8,7 +10,7 @@ import pytest
 from adbutils.errors import AdbError  # noqa: F401
 from uiautomator2.exceptions import ConnectError  # noqa: F401
 
-from mobile.config import Config
+from mobile.config import Config, ConfigError
 from mobile.prompt_parser import PromptIntent, parse_prompt
 from mobile import prompt_runner
 from mobile.prompt_runner import (
@@ -20,6 +22,7 @@ from mobile.prompt_runner import (
     _format_summary,
     _prompt_choice,
     _prompt_yes_no,
+    _reject_placeholder_serial,
     _repo_root,
     _resolve_confirmed_date,
     _resolve_confirmed_price,
@@ -398,6 +401,57 @@ class TestParseArgs:
     def test_config_override(self):
         args = parse_args(["张杰演唱会", "--config", "/tmp/custom.jsonc"])
         assert args.config == "/tmp/custom.jsonc"
+
+
+class TestParseArgsStrict:
+    """未知/缩写旗标 fail-fast（U-02：allow_abbrev=False）。"""
+
+    def test_unknown_flag_porbe_rejected(self):
+        # argparse 既有行为的回归锚，防止未来有人换成 parse_known_args
+        with pytest.raises(SystemExit) as e:
+            parse_args(["张杰演唱会", "--porbe"])
+        assert e.value.code == 2
+
+    def test_abbrev_mod_rejected_after_allow_abbrev_false(self):
+        # 修复前 --mod 被静默缩写匹配为 --mode
+        with pytest.raises(SystemExit) as e:
+            parse_args(["张杰演唱会", "--mod", "summary"])
+        assert e.value.code == 2
+
+    def test_abbrev_conf_rejected(self):
+        with pytest.raises(SystemExit) as e:
+            parse_args(["张杰演唱会", "--conf", "x.jsonc"])
+        assert e.value.code == 2
+
+    def test_abbrev_non_rejected(self):
+        with pytest.raises(SystemExit) as e:
+            parse_args(["张杰演唱会", "--non"])
+        assert e.value.code == 2
+
+    def test_full_flags_unaffected_by_allow_abbrev(self):
+        args = parse_args(
+            [
+                "张杰演唱会",
+                "--mode",
+                "probe",
+                "--yes",
+                "--config",
+                "x.jsonc",
+                "--non-interactive",
+            ]
+        )
+        assert args.mode == "probe"
+        assert args.yes is True
+        assert args.config == "x.jsonc"
+        assert args.non_interactive is True
+        # 短参 -y 不受 allow_abbrev=False 影响
+        assert parse_args(["张杰演唱会", "-y"]).yes is True
+
+    def test_mode_value_typo_still_rejected(self):
+        # choices 校验既有行为（值拼错），与 flag 拼错区分开
+        with pytest.raises(SystemExit) as e:
+            parse_args(["张杰演唱会", "--mode", "prob"])
+        assert e.value.code == 2
 
 
 # ---------------------------------------------------------------------------
@@ -893,6 +947,25 @@ class TestMain:
             price_index=0,
         )
 
+    # U-05「先构造后写盘」要求 build_updated_config 的返回值能真实构造 Config，
+    # 不能再用 {} 占位（Config(**{}) 会 TypeError 被兜底捕获返回 1）
+    _FULL_UPDATED_CONFIG = {
+        "serial": "ABC",
+        "keyword": "张杰 演唱会",
+        "target_title": "张杰演唱会",
+        "target_venue": "国家体育场",
+        "users": ["张志涛"],
+        "city": "北京",
+        "date": "04.06",
+        "price": "580元",
+        "price_index": 0,
+        "if_commit_order": False,
+        "probe_only": True,
+        "auto_navigate": True,
+        "rush_mode": True,
+        "fast_retry_interval_ms": 80,
+    }
+
     def test_apply_mode_saves_config_no_execute(self):
         """apply mode: saves config and returns 0 (execute=False)."""
         from mobile.prompt_runner import main
@@ -909,13 +982,16 @@ class TestMain:
                 return_value=self._base_config_mock(),
             ), \
             patch("mobile.prompt_runner.DamaiBot", return_value=mock_bot), \
-            patch("mobile.prompt_runner.save_config_dict") as mock_save, \
+            patch("mobile.prompt_runner.update_config_values") as mock_save, \
             patch("mobile.prompt_runner._resolve_confirmed_date", return_value="04.06"), \
             patch(
                 "mobile.prompt_runner._resolve_confirmed_price",
                 return_value={"index": 0, "text": "580元", "tag": "可预约"},
             ), \
-            patch("mobile.prompt_runner.build_updated_config", return_value={}), \
+            patch(
+                "mobile.prompt_runner.build_updated_config",
+                return_value=dict(self._FULL_UPDATED_CONFIG),
+            ), \
             patch("mobile.prompt_runner._prompt_yes_no", return_value=True):
             result = main(["帮张志涛抢4月6日张杰演唱会 580元", "--mode", "apply", "-y"])
         assert result == 0
@@ -947,7 +1023,7 @@ class TestMain:
                 return_value=self._base_config_mock(),
             ), \
             patch("mobile.prompt_runner.DamaiBot", return_value=mock_bot), \
-            patch("mobile.prompt_runner.save_config_dict"), \
+            patch("mobile.prompt_runner.update_config_values"), \
             patch("mobile.prompt_runner._resolve_confirmed_date", return_value="04.06"), \
             patch(
                 "mobile.prompt_runner._resolve_confirmed_price",

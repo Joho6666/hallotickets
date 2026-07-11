@@ -70,6 +70,9 @@ class DamaiBot(
         self.wait = None
         self._terminal_failure_reason = None
         self._last_run_outcome = None
+        # U-12：本次 run_with_retry 的总执行轮次（外层尝试与快速重试各 +1），
+        # 供运行摘要 attempts 字段消费；纯整数自增，零热路径开销。
+        self._attempts_made = 0
         self._last_discovery_step_timings = []
         # Cache of {key: (x, y)} coordinates for hot-path elements.
         # Populated on the first run and reused on warm retries (1 HTTP call vs 4+).
@@ -234,6 +237,39 @@ class DamaiBot(
         logger.info(
             f"{prefix}{outcome_messages.get(self._last_run_outcome, '本轮执行成功')}"
         )
+
+    def _finalize_submit_result(self, result, *, start_time=None):
+        """_submit_order_fast 结果 → (返回值, outcome/terminal) 的唯一映射。
+
+        主路径 run_ticket_grabbing 与快速重试 order_confirm_page 分支共用，
+        保证两条提交路径对同一 verify 结果语义一致（U-10）——
+        「成功」只能由 verify_order_result 确认，点击成功不算数。
+        耗时信息仅在提供 start_time 时输出（主路径口径）。
+        """
+        elapsed_suffix = (
+            "" if start_time is None else f"耗时: {time.time() - start_time:.2f}秒"
+        )
+        if result == "success":
+            self._set_run_outcome("order_submitted")
+            logger.info(f"抢票成功！{elapsed_suffix}")
+            return True
+        if result == "existing_order":
+            self._set_run_outcome("order_pending_payment")
+            logger.info(
+                f"检测到未支付订单（已占单待支付），请立即前往订单页支付。{elapsed_suffix}"
+            )
+            return True
+        if result in ("sold_out", "captcha"):
+            # 失败路径也记录真实结局，禁止虚报成功；不设 terminal，保留可重试语义。
+            self._set_run_outcome(result)
+            return False
+        # timeout / 未知值 — fail closed，避免虚假成功与重复提交
+        self._set_terminal_failure("submit_unverified")
+        logger.error(
+            f"提交后未能确认成功状态（result={result}），"
+            f"为避免重复下单已停止自动重试，请手动检查订单列表。{elapsed_suffix}"
+        )
+        return False
 
     @contextmanager
     def _timed_step(self, step_name, manual_baseline_seconds=None):
@@ -1043,28 +1079,7 @@ class DamaiBot(
             # 7. 提交订单
             logger.info("提交订单...")
             result = self._submit_order_fast(submit_selectors)
-            if result == "success":
-                self._set_run_outcome("order_submitted")
-                end_time = time.time()
-                logger.info(f"抢票成功！耗时: {end_time - start_time:.2f}秒")
-                return True
-            if result == "existing_order":
-                self._set_run_outcome("order_pending_payment")
-                end_time = time.time()
-                logger.info(
-                    f"检测到未支付订单（已占单待支付），请立即前往订单页支付。耗时: {end_time - start_time:.2f}秒"
-                )
-                return True
-            elif result in ("sold_out", "captcha"):
-                return False
-            # timeout/unknown — fail closed to avoid false positives and duplicate submissions
-            self._set_terminal_failure("submit_unverified")
-            end_time = time.time()
-            logger.error(
-                f"提交后未能确认成功状态（result={result}），"
-                f"为避免重复下单已停止自动重试，请手动检查订单列表。耗时: {end_time - start_time:.2f}秒"
-            )
-            return False
+            return self._finalize_submit_result(result, start_time=start_time)
 
         except Exception as e:
             logger.error(f"抢票过程发生错误: {e}")
@@ -1080,7 +1095,9 @@ class DamaiBot(
 
     def run_with_retry(self, max_retries=3, initial_page_probe=None):
         """带重试机制的抢票"""
+        self._attempts_made = 0
         for attempt in range(max_retries):
+            self._attempts_made += 1
             logger.info(f"第 {attempt + 1} 次尝试（{self._execution_mode_label()}）...")
             # Pass initial_page_probe only on the first attempt; retries must re-probe.
             probe = initial_page_probe if attempt == 0 else None
@@ -1096,6 +1113,7 @@ class DamaiBot(
 
             # Fast retry within same session
             for fast_attempt in range(self.config.fast_retry_count):
+                self._attempts_made += 1
                 logger.info(
                     f"快速重试 {fast_attempt + 1}/{self.config.fast_retry_count}"
                     f"（{self._execution_mode_label()}）..."

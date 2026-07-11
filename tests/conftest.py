@@ -112,6 +112,10 @@ def reset_environment(monkeypatch):
     env_vars_to_clear = [
         "DAMAI_USERNAME",
         "DAMAI_PASSWORD",
+        # U-12：开发者 shell 里残留的 serial/摘要路径覆盖会静默劫持
+        # 所有 config 相关测试（顺序相关的环境泄漏），必须逐测试清理。
+        "HATICKETS_SERIAL",
+        "HATICKETS_RESULT_JSON",
     ]
 
     for var in env_vars_to_clear:

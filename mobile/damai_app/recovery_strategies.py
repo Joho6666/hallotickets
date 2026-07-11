@@ -327,9 +327,13 @@ class RecoveryStrategiesMixin:
                     ),
                     (By.XPATH, '//*[contains(@text,"提交")]'),
                 ]
-                return self.smart_wait_for_element(
+                ok = self.smart_wait_for_element(
                     *submit_selectors[0], submit_selectors[1:]
                 )
+                if ok:
+                    # 与主路径 validation 口径一致，成功日志按真实结局输出
+                    self._set_run_outcome("validation_ready")
+                return ok
             if not self._ensure_attendees_selected_on_confirm_page():
                 self._set_terminal_failure("attendee_unselected")
                 return False
@@ -341,7 +345,11 @@ class RecoveryStrategiesMixin:
                 ),
                 (By.XPATH, '//*[contains(@text,"提交")]'),
             ]
-            return self.smart_wait_and_click(*submit_selectors[0], submit_selectors[1:])
+            # U-10：提交后必须复用主路径同源的 verify_order_result 验证结果，
+            # 禁止把「点击成功」直接当抢票成功虚报。
+            logger.info("快速重试：确认页重新提交订单，提交后验证下单结果")
+            result = self._submit_order_fast(submit_selectors)
+            return self._finalize_submit_result(result)
         elif state == "pending_order_dialog":
             self._set_run_outcome("order_pending_payment")
             logger.info(

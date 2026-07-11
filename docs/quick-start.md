@@ -20,15 +20,21 @@
 
 这 2 个用户阶段不要混淆：
 
-1. `./mobile/scripts/start_ticket_grabbing.sh --probe --yes`
-   只探测。会停在“立即购票/立即预订”之前，不会真正点击。
-2. `./mobile/scripts/start_ticket_grabbing.sh --yes`
-   才是正式提交模式。
+1. `./mobile/scripts/start_ticket_grabbing.sh --probe`
+   只探测。会停在“立即购票/立即预订”之前，不会真正点击。（自动化场景可加 `--yes` 跳过确认）
+2. `./mobile/scripts/start_ticket_grabbing.sh --commit --yes`
+   才是正式提交模式，启动前会打印下单摘要并倒数 3 秒。
+
+三个旗标的语义先记牢：
+
+- `--probe`：安全探测，绝不下单
+- `--commit`：唯一会真实下单的旗标；不带 `--yes` 时还需手动输入确认词
+- `--yes`：仅跳过普通确认；**漏敲 `--probe` 不再会真下单，脚本会直接报错退出**
 
 也就是说：
 
-- 第 4 步是测试“能不能找到正确演出页”
-- 第 5 步是真正开始抢票
+- 安全探测见 [3.2 推荐：直接用 prompt 做安全探测](#32-推荐直接用-prompt-做安全探测)
+- 正式抢票见 [4. 真正开始抢票](#4-真正开始抢票)
 
 ## 1. 安装依赖
 
@@ -58,7 +64,7 @@ List of devices attached
 ABC1234567	device
 ```
 
-这里的 `ABC1234567` 就是你的 `udid`。
+这里的 `ABC1234567` 就是你的 `serial`（配置文件中的设备序列号字段）。
 
 安卓版本可以这样取：
 
@@ -83,36 +89,45 @@ cp mobile/config.example.jsonc mobile/config.jsonc
 
 然后至少改这几个字段：
 
+<!-- CONFIG_EXAMPLE:BEGIN -->
 ```jsonc
 {
-  "udid": "你的 adb devices 序列号",
-  "app_package": "cn.damai",
-  "app_activity": ".launcher.splash.SplashMainActivity",
-  "item_url": "https://m.damai.cn/shows/item.html?itemId=你的 itemId",
-  "keyword": null,
-  "users": ["你已经在大麦 App 中添加成功的观演人姓名"],
-  "city": "你的演出城市",
-  "date": "你的场次日期",
-  "price": "你的票档原文",
+  // adb devices 显示的设备序列号
+  "serial": "你的设备序列号",
+  // 在大麦 App 内搜索目标演出的关键词（必填，不能为 null）
+  "keyword": "张杰 演唱会",
+  // 必须是你已经在大麦 App 中添加成功的观演人；人数 = 购票张数
+  "users": ["你的真实观演人姓名"],
+  "city": "演出城市",
+  "date": "场次日期",
+  "price": "票档原文",
   "price_index": 0,
-  "if_commit_order": false,
   "probe_only": true,
+  "if_commit_order": false,
   "auto_navigate": true
 }
 ```
+<!-- CONFIG_EXAMPLE:END -->
 
 关键说明：
 
-- `item_url`：推荐填大麦详情页链接，脚本会自动提取 `itemId`
-- `keyword`：如果 `item_url` 已可用，可以填 `null`
+- `serial`：`adb devices` 输出的设备序列号
+- `keyword`：必填，不能为空或 `null`；脚本用它在大麦 App 内搜索目标演出
 - `users`：必须是已经在大麦 App 里添加成功的真实观演人；人数就是购票数量
 - `city / date / price`：尽量按 App 页面原文填写
 - `price_index`：文本匹配失败时的兜底索引，从 `0` 开始
 - `probe_only=true`：脚本内部使用的探测标记；普通用户优先用 `--probe`
-- `if_commit_order=false`：脚本会继续到确认页并执行观演人勾选校验，但会停在“立即提交”前；正式抢票时 `start_ticket_grabbing.sh --yes` 会自动改成 `true`
+- `if_commit_order=false`：脚本会继续到确认页并执行观演人勾选校验，但会停在“立即提交”前；正式抢票时 `start_ticket_grabbing.sh --commit` 会自动改成 `true`
 - `auto_navigate=true`：允许脚本从首页自动进入目标演出
 
 如果你是开发者，也可以额外创建 `mobile/config.local.jsonc` 作为本地覆盖配置。它不会提交到 GitHub，但默认不会自动生效；只有显式通过 `--config mobile/config.local.jsonc` 或 `HATICKETS_CONFIG_PATH=mobile/config.local.jsonc` 才会启用。
+
+另外两个运行期环境变量（U-12，详见 [README「退出码与运行摘要」](../README.md#退出码与运行摘要)）：
+
+- `HATICKETS_SERIAL`：覆盖配置中的 `serial`（不改写配置文件），同一份 config 可复用到多台设备；脚本参数 `--serial <serial>` 就是它的透传通道
+- `HATICKETS_RESULT_JSON`：机器可读运行摘要 JSON 的输出路径（默认 `mobile/tmp/run_summary.json`）；脚本参数 `--result-json <path>` 同义
+
+脚本与 `python -m damai_app` 现在会返回语义化退出码（`0` 成功 / `10` 重试耗尽 / `11` 不可重试失败 / `12` 配置或设备错误 / `130` 用户中断），供 cron/systemd 等编排消费，退出码表见 README。
 
 ## 3.1 开抢前多久启动脚本
 
@@ -162,12 +177,12 @@ cp mobile/config.example.jsonc mobile/config.jsonc
 - 自动做一次安全探测
 - 停在购票点击前，不会直接下单
 
-也就是说，对普通用户来说，这一步已经覆盖了原来独立的“第 5 步安全探测”。
+也就是说，对普通用户来说，这一步已经覆盖了独立的安全探测步骤。
 
-如果你是手动配置用户，完成第 3 步后，也可以直接用下面这条命令做安全探测：
+如果你是手动配置用户，完成 [3. 准备本地配置](#3-准备本地配置) 后，也可以直接用下面这条命令做安全探测：
 
 ```bash
-./mobile/scripts/start_ticket_grabbing.sh --probe --yes
+./mobile/scripts/start_ticket_grabbing.sh --probe
 ```
 
 通过的标志是：
@@ -180,13 +195,15 @@ cp mobile/config.example.jsonc mobile/config.jsonc
 
 ## 4. 真正开始抢票
 
-第 3 步探测通过后，直接执行：
+[3. 准备本地配置](#3-准备本地配置) 的探测通过后，直接执行：
 
 ```bash
-./mobile/scripts/start_ticket_grabbing.sh --yes
+./mobile/scripts/start_ticket_grabbing.sh --commit --yes
 ```
 
-这一步才会真正点击”立即提交”。如果当前配置里还是探测模式，脚本会先提醒你，再自动把配置切到正式抢票模式，然后继续执行。如果下单成功，通常会进入支付页；后续支付需要你自己完成。
+这一步才会真正点击”立即提交”。如果当前配置里还是探测模式，脚本会先提醒你，把配置切到正式抢票模式，并在打印下单摘要、倒数 3 秒后继续执行。不带 `--yes` 时还需要手动输入确认词（`GO` 或配置里的 `keyword` 原文）。如果下单成功，通常会进入支付页；后续支付需要你自己完成。
+
+> ⚠️ 旧命令 `./mobile/scripts/start_ticket_grabbing.sh --yes`（不带 `--commit`）已不再触发真实下单，会直接报错并给出迁移指引。
 
 再提醒一次：
 
@@ -206,8 +223,8 @@ cp mobile/config.example.jsonc mobile/config.jsonc
 - 只有当你手动写了张数、且和观演人数不一致时，脚本才会停止
 - 这种情况下不会继续搜索、连接设备，也不会写配置
 - 脚本会直接打印一条或两条“可复制的正确命令”，你按输出重试即可
-- 如果当前只连接了一台安卓设备，脚本会自动识别 `udid / platform_version`
-- 在 `apply / probe` 模式下，设备字段也会一起写回 `mobile/config.jsonc`
+- 如果当前只连接了一台安卓设备，脚本会自动识别 `serial`
+- 在 `apply / probe` 模式下，设备序列号也会一起写回 `mobile/config.jsonc`
 - 推荐格式：`给张三和李四抢4 月 6 号张杰的北京站演唱会内场门票，票价 1680 元`
 - 使用时请把 `张三`、`李四` 替换成你自己已经在大麦 App 中添加成功的真实观演人姓名
 
@@ -265,7 +282,7 @@ cp mobile/config.example.jsonc mobile/config.jsonc
 如果你想正式开始抢票，直接执行：
 
 ```bash
-./mobile/scripts/start_ticket_grabbing.sh --yes
+./mobile/scripts/start_ticket_grabbing.sh --commit --yes
 ```
 
-如果当前配置里还是探测模式，这条命令会先提醒你，再自动把配置切到正式抢票模式。
+如果当前配置里还是探测模式，这条命令会先提醒你，把配置切到正式抢票模式，并在打印下单摘要、倒数 3 秒后继续执行。
