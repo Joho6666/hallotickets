@@ -141,23 +141,44 @@ class DamaiBot(
 
     _SOLD_OUT_RE = re.compile(r"缺货|售罄|无票")
 
+    _BUY_BUTTON_NODE_IDS = ("btn_buy_view", "cn.damai:id/btn_buy_view")
+    _BUY_BAR_CONTAINER_NODE_IDS = (
+        "trade_project_detail_purchase_status_bar_container_fl",
+        "cn.damai:id/trade_project_detail_purchase_status_bar_container_fl",
+    )
+
+    def _node_shows_sold_out(self, node):
+        """判断单个 XML 节点的 text/content-desc 是否包含缺货文案。"""
+        text = node.get("text", "")
+        desc = node.get("content-desc", "")
+        return bool(
+            self._SOLD_OUT_RE.search(text) or self._SOLD_OUT_RE.search(desc)
+        )
+
     def _is_buy_button_sold_out(self):
         """Check if the buy button itself shows sold-out text.
 
-        Only inspects the btn_buy_view element, not the whole page, to avoid
-        false positives from other price tiers showing '缺货登记'.
+        Only inspects the buy button / purchase-bar element, not the whole
+        page, to avoid false positives from other price tiers showing '缺货登记'.
+
+        优先匹配 v8.x 的 btn_buy_view（有文案，可判缺货）；仅当其在整棵树中
+        不存在时才回退到 ≥9.0.2x 的购买栏容器（issue #41）。注意 iter("node")
+        是文档序（父先于子），容器很可能是 btn_buy_view 的祖先，不能在首个
+        命中节点上早退，否则 v8.x 的缺货文本会被空文案容器短路漏检。
+        容器为 Canvas 自绘（text/content-desc 均空）时返回 False，不误判缺货。
         """
         xml_root = self._dump_hierarchy_xml()
         if xml_root is None:
             return False
+        container_node = None
         for node in xml_root.iter("node"):
             rid = node.get("resource-id", "")
-            if rid in ("btn_buy_view", "cn.damai:id/btn_buy_view"):
-                text = node.get("text", "")
-                desc = node.get("content-desc", "")
-                if self._SOLD_OUT_RE.search(text) or self._SOLD_OUT_RE.search(desc):
-                    return True
-                return False
+            if rid in self._BUY_BUTTON_NODE_IDS:
+                return self._node_shows_sold_out(node)
+            if container_node is None and rid in self._BUY_BAR_CONTAINER_NODE_IDS:
+                container_node = node
+        if container_node is not None:
+            return self._node_shows_sold_out(container_node)
         return False
 
     def _set_terminal_failure(self, reason):

@@ -1,5 +1,6 @@
 """Unit tests for mobile/prompt_runner.py."""
 
+import subprocess
 from pathlib import Path
 from unittest.mock import Mock, patch
 
@@ -517,6 +518,26 @@ def test_config_path_returns_jsonc(monkeypatch):
     assert path.name == "config.jsonc"
 
 
+def test_list_connected_device_ids_uses_utf8_wrapper():
+    """issue #50 回归锁：adb devices 经 run_captured 显式 UTF-8 解码。"""
+    completed = subprocess.CompletedProcess(
+        args=["adb"],
+        returncode=0,
+        stdout="List of devices attached\nc6c4eb67\tdevice\n",
+        stderr="",
+    )
+    with patch(
+        "mobile.proc_utils.subprocess.run", return_value=completed
+    ) as mock_run:
+        device_ids = prompt_runner._list_connected_device_ids()
+
+    assert device_ids == ["c6c4eb67"]
+    kwargs = mock_run.call_args.kwargs
+    assert kwargs["encoding"] == "utf-8"
+    assert kwargs["errors"] == "replace"
+    assert kwargs["check"] is True
+
+
 class TestAutoSyncDeviceConfig:
     def test_auto_sync_uses_single_connected_device(self):
         base_config = {"serial": "emulator-5554"}
@@ -745,6 +766,95 @@ class TestMain:
         assert result == 1
         mock_logger.error.assert_called_once()
         assert "未能根据提示词打开目标演出" in mock_logger.error.call_args[0][0]
+
+    def test_discovery_failure_prints_candidates(self):
+        # issue #51+#50：discover 失败且 bot 暴露候选列表时，错误文案列出
+        # top-5 候选并引导用户补全标题；exit code 仍为 1，绝不自动点击候选
+        from mobile.prompt_runner import main
+
+        mock_bot = Mock()
+        mock_bot.driver = None
+        mock_bot.probe_current_page.return_value = {"state": "search_page"}
+        mock_bot.discover_target_event.return_value = None
+        mock_bot._last_failed_candidates = [
+            {
+                "title": "凤凰传奇「吉祥如意」2026巡演·广州站",
+                "city": "广州",
+                "venue": "广州体育馆",
+                "time": "2026.07.18",
+                "score": 64,
+                "used_keyword": "凤凰传奇 演唱会",
+            },
+            {
+                "title": "五月天2026巡回演唱会广州站",
+                "city": "广州",
+                "venue": "宝能观致文化中心",
+                "time": "2026.08.01",
+                "score": 40,
+                "used_keyword": "凤凰传奇",
+            },
+        ]
+
+        with \
+            patch(
+                "mobile.prompt_runner._config_path",
+                return_value=Mock(__str__=lambda s: "/mock/config.jsonc"),
+            ), \
+            patch("mobile.prompt_runner.load_config_dict", return_value={}), \
+            patch("mobile.prompt_runner.Config.load_config") as mock_cfg, \
+            patch("mobile.prompt_runner.DamaiBot", return_value=mock_bot), \
+            patch("mobile.prompt_runner.logger") as mock_logger:
+            mock_cfg.return_value = Mock(
+                to_dict=lambda: {
+                    "serial": "ABC",
+                    "app_package": "cn.damai",
+                    "app_activity": ".SplashMainActivity",
+                    "keyword": "凤凰传奇 演唱会",
+                    "users": ["张志涛"],
+                    "city": "广州",
+                    "date": "07.18",
+                    "price": "580元",
+                    "price_index": 0,
+                    "if_commit_order": False,
+                    "probe_only": True,
+                    "auto_navigate": True,
+                },
+                city="广州",
+                date="07.18",
+                price="580元",
+                price_index=0,
+            )
+            result = main(
+                ["帮张志涛抢广州的凤凰传奇演唱会门票", "--mode", "summary"]
+            )
+
+        assert result == 1
+        mock_logger.error.assert_called_once()
+        message = mock_logger.error.call_args[0][0]
+        assert "未能自动确认目标演出" in message
+        assert "凤凰传奇「吉祥如意」2026巡演·广州站" in message
+        assert "五月天2026巡回演唱会广州站" in message
+        assert "把完整演出标题原文写进提示词" in message
+
+    def test_discovery_failure_with_non_list_candidates_keeps_old_message(self):
+        # 防御回归：_last_failed_candidates 为 MagicMock（非 list，旧版 bot /
+        # 全 Mock 场景）时不崩溃，输出原有错误文案
+        from mobile.prompt_runner import _build_discovery_failure_message
+
+        intent = Mock(candidate_keywords=["张杰 演唱会", "张杰"])
+        bot = Mock()  # _last_failed_candidates 自动成为 Mock（非 list）
+        assert (
+            _build_discovery_failure_message(bot, intent)
+            == "未能根据提示词打开目标演出"
+        )
+
+        # list 里混入非 dict 项同样兜底回原文案
+        bot_bad_items = Mock()
+        bot_bad_items._last_failed_candidates = ["不是字典"]
+        assert (
+            _build_discovery_failure_message(bot_bad_items, intent)
+            == "未能根据提示词打开目标演出"
+        )
 
     def _make_full_mock_bot(self, discovery=None):
         """Helper: build a fully-mocked bot for non-summary mode tests."""

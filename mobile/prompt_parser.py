@@ -9,9 +9,9 @@ from typing import Iterable, Optional
 
 try:
     from mobile.date_utils import normalize_date as _normalize_date_external
-    from mobile.item_resolver import normalize_text
+    from mobile.item_resolver import KNOWN_CITY_TOKENS, normalize_text
 except ImportError:
-    from item_resolver import normalize_text
+    from item_resolver import KNOWN_CITY_TOKENS, normalize_text  # type: ignore[no-redef]
 
 
 _CHINESE_DIGITS = {
@@ -29,47 +29,9 @@ _CHINESE_DIGITS = {
     "十": 10,
 }
 
-_KNOWN_CITY_TOKENS = (
-    "北京",
-    "上海",
-    "深圳",
-    "广州",
-    "杭州",
-    "成都",
-    "重庆",
-    "武汉",
-    "南京",
-    "西安",
-    "苏州",
-    "天津",
-    "长沙",
-    "郑州",
-    "青岛",
-    "宁波",
-    "福州",
-    "厦门",
-    "南昌",
-    "沈阳",
-    "大连",
-    "合肥",
-    "无锡",
-    "佛山",
-    "东莞",
-    "珠海",
-    "昆明",
-    "贵阳",
-    "南宁",
-    "长春",
-    "哈尔滨",
-    "太原",
-    "石家庄",
-    "济南",
-    "兰州",
-    "海口",
-    "三亚",
-    "乌鲁木齐",
-    "呼和浩特",
-)
+# issue #51+#50：城市 token 全集迁移至 mobile/item_resolver.KNOWN_CITY_TOKENS
+# （event_navigator 的城市冲突 veto 也要用）。保留旧名别名，兼容既有 import。
+_KNOWN_CITY_TOKENS = KNOWN_CITY_TOKENS
 
 _REQUEST_STOPWORDS = (
     "帮我",
@@ -311,7 +273,9 @@ def _compact_keyword_phrase(value: str) -> str:
 
 
 def _parse_artist_and_keyword(
-    prompt: str, removable_tokens: Optional[Iterable[str]] = None
+    prompt: str,
+    removable_tokens: Optional[Iterable[str]] = None,
+    city: Optional[str] = None,
 ) -> tuple[Optional[str], Optional[str], list[str]]:
     cleaned = _clean_prompt_for_keyword(prompt, removable_tokens=removable_tokens)
 
@@ -330,6 +294,21 @@ def _parse_artist_and_keyword(
     candidates = []
     if artist:
         candidates.extend([f"{artist} 演唱会", artist])
+
+    # issue #51：城市全局 replace 会把「龙拳·北京」这类标题自带前缀拦腰挖成
+    # 「龙拳·」。追加一个「保留城市版」完整短语候选（removable_tokens 中剔除
+    # 城市与「城市+站」后重新清洗），插入 index=2——search_keyword 与
+    # candidate_keywords[:2] 保持不变，不破坏既有顺序锁定。
+    if city and artist:
+        city_tokens = {city, f"{city}站"}
+        tokens_without_city = [
+            token for token in (removable_tokens or ()) if token not in city_tokens
+        ]
+        city_preserving = _clean_prompt_for_keyword(
+            prompt, removable_tokens=tokens_without_city
+        )
+        if city_preserving:
+            candidates.insert(min(2, len(candidates)), city_preserving)
 
     if cleaned:
         candidates.append(cleaned)
@@ -352,6 +331,110 @@ def _parse_artist_and_keyword(
     return artist, (deduped[0] if deduped else None), deduped
 
 
+# ---------------------------------------------------------------------------
+# issue #45：票价解析前的日程片段剥离
+#
+# 旧版宽松价格正则「([1-9]\d{1,4})\s*元?」中「元」可选且取首个匹配，导致
+# 「5月30号」的日份、「23点/23:00」的开抢时间、「抢12张」的张数等数字
+# 抢先被当成票价（如「5月30号…票价1380元」误判为 30 元）。
+# 修复思路与 _parse_quantity / _clean_prompt_for_keyword 的既有惯例对齐：
+# 先剥离日期/时间/张数片段，再做价格匹配；日期剥离形态与
+# mobile/date_utils._PATTERNS 保持一致，保证「日期能识别的片段价格一定不误食」。
+# ---------------------------------------------------------------------------
+
+_SCHEDULE_FRAGMENT_PATTERNS = (
+    # 5月30号 / 4 月 6 日 / 04月06日
+    re.compile(r"\d{1,2}\s*月\s*\d{1,2}\s*[号日好]?"),
+    # 2026-04-06 / 2026/04/06 / 2026.04.06（带年份的完整日期）
+    re.compile(r"(?<![\d.])\d{4}\s*[./-]\s*\d{1,2}\s*[./-]\s*\d{1,2}(?![\d.])"),
+    # 2026年
+    re.compile(r"\d{4}\s*年"),
+    # 23:00 / 23：00（开抢时间）
+    re.compile(r"(?<!\d)\d{1,2}\s*[:：]\s*\d{2}(?!\d)"),
+    # 23点 / 19点30分（(?<!\d) 防止「1380点」被截出残数「13」）
+    re.compile(r"(?<!\d)\d{1,2}\s*[点时](?:\s*\d{1,2}\s*分?)?"),
+)
+
+# 4/18 / 12-15 / 4.6 这类无年份短日期：仅当月/日均合法时才剥离，
+# 保住「50-80元」这类两位数价格区间（50 不是合法月份）。
+_SHORT_DATE_PATTERN = re.compile(r"(?<![\d.])(\d{1,2})\s*[./-]\s*(\d{1,2})(?![\d.])")
+
+# 张数片段（抢12张 / 两张）。必须在短日期剥离之后执行：
+# 否则「12-15 张杰」会先被吃掉「15 张」，令短日期「12-15」残缺，
+# 残数 12 会被宽松回退层误判为票价。
+_QUANTITY_FRAGMENT_PATTERN = re.compile(r"[0-9零一二两三四五六七八九十]+\s*张")
+
+
+def _replace_short_date_if_valid(match: "re.Match[str]") -> str:
+    month = int(match.group(1))
+    day = int(match.group(2))
+    if 1 <= month <= 12 and 1 <= day <= 31:
+        return " "
+    return match.group(0)
+
+
+def _strip_schedule_fragments(text: str) -> str:
+    """剥离日期/时间/张数片段，避免票价解析误食其中的数字（issue #45）。"""
+    stripped = text or ""
+    for pattern in _SCHEDULE_FRAGMENT_PATTERNS:
+        stripped = pattern.sub(" ", stripped)
+    stripped = _SHORT_DATE_PATTERN.sub(_replace_short_date_if_valid, stripped)
+    return _QUANTITY_FRAGMENT_PATTERN.sub(" ", stripped)
+
+
+# seat token 预剥离顺序：按长度降序，保证「看台区」先于「看台」被替换
+_SEAT_TOKENS_BY_LENGTH = tuple(
+    sorted(set(_SEAT_HINTS), key=lambda token: (-len(token), token))
+)
+
+# Tier1 上下文锚定：带「票价/价格/¥/元」等价格语境的数字优先命中
+_PRICE_ANCHORED_PATTERNS = (
+    re.compile(r"(?:票价|价格|价位|单价)\s*[为是:：]?\s*([1-9]\d{1,4})(?!\d)"),
+    re.compile(r"[¥￥]\s*([1-9]\d{1,4})(?!\d)"),
+    re.compile(r"([1-9]\d{1,4})(?!\d)\s*元"),
+)
+
+# Tier2 宽松回退：无价格语境的裸数字（兼容「内场280」「看台票 899」等输入）。
+# (?<![A-Za-z\d])：排除「顽童mj116」这类字母数字混合 token 内的数字；
+# (?!\d)：堵死贪婪回溯绕过——没有它「1380号」会回溯成「138」骗过后面的断言；
+# (?!\s*[月号日张点时分秒年:：])：双保险，即使剥离有遗漏也排除紧跟
+# 日期/时间/张数单位的数字。
+_PRICE_LOOSE_PATTERN = re.compile(
+    r"(?<![A-Za-z\d])([1-9]\d{1,4})(?!\d)(?!\s*[月号日张点时分秒年:：])"
+)
+
+# 可观测性事件：票价是在剥离日程片段后解析出来的。同时追加到 intent.notes
+# （summary 模式「提示:」段会打印）与 diagnostics（不可执行路径打印），
+# 便于真机排查。措辞刻意避开「日期」「票档」字样，不干扰缺失字段类提示的判定。
+_SCHEDULE_STRIP_NOTE = (
+    "price_parse.schedule_fragments_stripped："
+    "已剥离场次/时间/张数片段后再解析票价，避免误匹配"
+)
+
+
+def _extract_numeric_price(prompt: str) -> Optional[int]:
+    """从提示词中提取票价数字（issue #45 修复核心）。
+
+    步骤：
+    1. 剥离日期/时间/张数片段（``_strip_schedule_fragments``）；
+    2. 把 seat token 替换为空格，使「VIP1680」的数字独立成词
+       （否则 Tier2 的 lookbehind 会挡掉紧贴 seat 的价格）；
+    3. 两层匹配：Tier1 上下文锚定优先，Tier2 宽松回退；层内取首个匹配，
+       保持现行「多候选取第一个」语义。
+    """
+    stripped = _strip_schedule_fragments(prompt or "")
+    for token in _SEAT_TOKENS_BY_LENGTH:
+        stripped = stripped.replace(token, " ")
+    for pattern in _PRICE_ANCHORED_PATTERNS:
+        match = pattern.search(stripped)
+        if match:
+            return int(match.group(1))
+    loose_match = _PRICE_LOOSE_PATTERN.search(stripped)
+    if loose_match:
+        return int(loose_match.group(1))
+    return None
+
+
 def _parse_price_hints(
     prompt: str,
 ) -> tuple[Optional[str], Optional[str], Optional[int]]:
@@ -361,10 +444,7 @@ def _parse_price_hints(
             seat_hint = token
             break
 
-    numeric_price = None
-    numeric_match = re.search(r"([1-9]\d{1,4})\s*元?", prompt)
-    if numeric_match:
-        numeric_price = int(numeric_match.group(1))
+    numeric_price = _extract_numeric_price(prompt)
 
     if seat_hint and numeric_price:
         return f"{seat_hint}{numeric_price}元", seat_hint, numeric_price
@@ -376,10 +456,15 @@ def _parse_price_hints(
 
 
 def _parse_price_range(prompt: str) -> tuple[Optional[int], Optional[int]]:
-    """从 ``500-800元`` / ``500到800`` 等区间表达中识别 (min, max)。"""
+    """从 ``500-800元`` / ``500到800`` 等区间表达中识别 (min, max)。
+
+    先剥离日程片段：避免「12-15」这类短横线日期被误判为价格区间
+    （issue #45 同族缺陷）。
+    """
+    stripped = _strip_schedule_fragments(prompt or "")
     match = re.search(
         r"([1-9]\d{1,4})\s*[-~到至]\s*([1-9]\d{1,4})\s*元?",
-        prompt or "",
+        stripped,
     )
     if not match:
         return None, None
@@ -434,6 +519,7 @@ def parse_prompt(prompt: str) -> "ParseResult":
     artist, keyword, candidate_keywords = _parse_artist_and_keyword(
         normalized_prompt,
         removable_tokens=removable_tokens,
+        city=parsed_city,
     )
 
     intent = PromptIntent(
@@ -470,6 +556,17 @@ def parse_prompt(prompt: str) -> "ParseResult":
     if not intent.price_hint:
         intent.notes.append("提示词中未识别到明确票档偏好，后续会使用查询结果确认票档")
 
+    # issue #45 可观测性：票价/区间是在剥离日程片段后解析出来的时，
+    # 同时写入 notes（summary「提示:」段可见）与 diagnostics（不可执行路径可见）
+    price_recognized = numeric_price is not None or (
+        price_min is not None and price_max is not None
+    )
+    schedule_fragments_stripped = (
+        _strip_schedule_fragments(normalized_prompt) != normalized_prompt
+    )
+    if price_recognized and schedule_fragments_stripped:
+        intent.notes.append(_SCHEDULE_STRIP_NOTE)
+
     diagnostics: list[str] = []
     confidence = 0.0
     if intent.search_keyword:
@@ -494,6 +591,8 @@ def parse_prompt(prompt: str) -> "ParseResult":
         )
     else:
         diagnostics.append("未识别到票档偏好，将依赖页面默认推荐")
+    if price_recognized and schedule_fragments_stripped:
+        diagnostics.append(_SCHEDULE_STRIP_NOTE)
     if intent.city:
         confidence += 0.05
         diagnostics.append(f"识别目标城市：{intent.city}（+0.05）")

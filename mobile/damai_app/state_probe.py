@@ -219,8 +219,8 @@ class StateProbeMixin:
             By.ID, "cn.damai:id/trade_project_detail_purchase_status_bar_container_fl"
         )
         detail_price_summary = self._has_element(
-            By.ID, "cn.damai:id/project_detail_price_layout"
-        )
+            By.ID, "cn.damai:id/info_v2_price_layout"
+        ) or self._has_element(By.ID, "cn.damai:id/project_detail_price_layout")
         sku_price_container = (
             self._has_element(
                 By.ID, "cn.damai:id/project_detail_perform_price_flowlayout"

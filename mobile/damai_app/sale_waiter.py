@@ -129,27 +129,96 @@ class SaleWaiterMixin:
             )
             time.sleep(sleep_seconds)
 
-        # Use BuyButtonGuard for precise button-text monitoring
-        guard_t0 = time.monotonic()
-        if hasattr(self, "_guard") and self._guard.wait_until_safe(
-            timeout_s=8.0, poll_ms=50
-        ):
-            log_event(
-                logger,
-                "sale_ready",
-                source="buy_button_guard",
-                cta_text=None,
-                polls=None,
-                duration_ms=int((time.monotonic() - guard_t0) * 1000),
-            )
-            return
-
-        # Tight polling loop with multiple purchase signals until the page becomes actionable.
+        # 交错轮询循环（issue #41）：每轮依次做「guard 文案读取（廉价）→ Canvas
+        # 坐标兜底 → 页面结构多信号兜底」。旧实现先串行烧 guard.wait_until_safe
+        # 8s，再串行烧文案轮询 8s；大麦 ≥9.0.2x 详情页 CTA 为 Canvas 自绘
+        # （btn_buy_view 已移除、无任何文案节点），两段全部超时，开抢比配置晚 ~8s。
         deadline = sell_time + timedelta(seconds=8)
         polls = 0
+        saw_cta_text = False
+        guard = getattr(self, "_guard", None)
+        # 开售前预判 CTA 是否为 Canvas 自绘（大麦 ≥9.0.2x）：读不到任何文案、但能
+        # 按候选 resource-id 定位到中心坐标。若是，则开售前不再每轮跑昂贵的
+        # _is_sale_ready（对 Canvas 详情页恒 False，单次 ~1s 串行 u2 查询）——否则
+        # 当 sell_time 落在某轮 in-flight 的 _is_sale_ready 期间，开抢会被这一次
+        # 查询整体拖后 ~1 个周期（真机实测晚 ~2s）。get_current_text 在前，短路
+        # 保证 v8.x（有文案）路径不会触发多余的坐标查询（issue #41 收尾）。
+        canvas_cta = False
+        if guard is not None:
+            try:
+                canvas_cta = (
+                    guard.get_current_text() is None
+                    and guard.get_cta_center_coords() is not None
+                )
+            except Exception:
+                canvas_cta = False
         loop_t0 = time.monotonic()
-        while datetime.now(tz=_tz_shanghai) < deadline:
+        while True:
+            now = datetime.now(tz=_tz_shanghai)
+            if now >= deadline:
+                break
             polls += 1
+
+            # (0) Canvas 自绘 CTA 快路径（大麦 ≥9.0.2x，issue #41 核心+收尾）：
+            #     开售前只做 ~20ms 短睡、绝不做任何 u2 文案查询（get_current_text
+            #     对纯 Canvas 容器要遍历子树 ~1s，恒返回 None，每轮查询只会把开抢
+            #     时刻整体拖后 ~1 个周期）；到点即按候选 resource-id 中心坐标兜底
+            #     返回，点击交给下游 _enter_purchase_flow_from_detail_page 的容器
+            #     ID/坐标路径（预约风险由 SKU 页 reservation_mode 检测兜底）。置于
+            #     文案查询之前，把开抢延迟从 ~1 个 u2 查询周期收紧到一个短睡间隔。
+            if canvas_cta and not saw_cta_text:
+                if now < sell_time:
+                    time.sleep(0.02)
+                    continue
+                coords = guard.get_cta_center_coords()
+                if coords is not None:
+                    log_event(
+                        logger,
+                        "cta_canvas_fallback",
+                        resource_id=guard._last_matched_resource_id,
+                        coords=coords,
+                        waited_ms=int((time.monotonic() - loop_t0) * 1000),
+                        polls=polls,
+                    )
+                    return
+                # 坐标意外丢失：放弃 Canvas 快路径，回落通用轮询兜底。
+                canvas_cta = False
+
+            # (1) v8.x 文案路径：读到安全购买文案立即返回（保留开售前文案翻转
+            #     即提前返回的能力，SAFE/BLOCKED 校验行为不变）。
+            text = guard.get_current_text() if guard is not None else None
+            if text:
+                saw_cta_text = True
+                if guard.is_safe_to_click(text):
+                    log_event(
+                        logger,
+                        "sale_ready",
+                        source="buy_button_guard",
+                        cta_text=text,
+                        polls=polls,
+                        duration_ms=int((time.monotonic() - loop_t0) * 1000),
+                    )
+                    return
+
+            # (2) Canvas 自绘 CTA 兜底（issue #41 核心）：已到开售时刻、全程未读到
+            #     任何 CTA 文案、且能按候选 resource-id 定位到 CTA 中心坐标时立即
+            #     返回，把点击交给下游 _enter_purchase_flow_from_detail_page 的
+            #     容器 ID/坐标路径（预约风险由 SKU 页 reservation_mode 检测兜底）。
+            #     必须置于 _is_sale_ready 之前，避免被其每轮 ~1s 的串行 u2 查询拖后。
+            if now >= sell_time and not saw_cta_text and guard is not None:
+                coords = guard.get_cta_center_coords()
+                if coords is not None:
+                    log_event(
+                        logger,
+                        "cta_canvas_fallback",
+                        resource_id=guard._last_matched_resource_id,
+                        coords=coords,
+                        waited_ms=int((time.monotonic() - loop_t0) * 1000),
+                        polls=polls,
+                    )
+                    return
+
+            # (3) 老版页面结构兜底：多购买信号文案轮询（行为不变）。
             if self._is_sale_ready():
                 cta_text = getattr(self, "_last_sale_ready_text", None) or "?"
                 log_event(
@@ -161,7 +230,7 @@ class SaleWaiterMixin:
                     duration_ms=int((time.monotonic() - loop_t0) * 1000),
                 )
                 return
-            time.sleep(0.08)
+            time.sleep(0.05)
 
         log_event(
             logger,

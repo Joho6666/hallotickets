@@ -12,10 +12,20 @@ caller can record ``damai_version=unknown`` instead of crashing the boot.
 
 from __future__ import annotations
 
+import logging
 import re
 import shutil
-import subprocess
+import subprocess  # 仍需保留：except 元组引用 subprocess.SubprocessError
 from typing import Optional
+
+try:
+    from mobile.logger import get_logger, log_event
+    from mobile.proc_utils import run_captured
+except ImportError:  # pragma: no cover
+    from logger import get_logger, log_event  # type: ignore[no-redef]
+    from proc_utils import run_captured  # type: ignore[no-redef]
+
+logger = get_logger(__name__)
 
 # Damai Android package id (matches Config.app_package default).
 _DAMAI_PACKAGE = "cn.damai"
@@ -47,14 +57,18 @@ def _run_adb_pm_dump(
     cmd.extend(["shell", "pm", "dump", package])
 
     try:
-        result = subprocess.run(  # noqa: S603 — adb is a trusted binary
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=timeout_s,
-            check=False,
+        # 经 run_captured 显式 UTF-8 解码，修复 Windows GBK 下 pm dump
+        # 巨量中文输出的 UnicodeDecodeError（issue #50）。
+        result = run_captured(cmd, timeout=timeout_s, check=False)
+    except (OSError, subprocess.SubprocessError, UnicodeDecodeError) as exc:
+        # UnicodeDecodeError 为纵深防御：errors='replace' 后理论上不再抛，
+        # 但保持 best-effort 契约（任何失败 → None → damai_version=unknown）。
+        log_event(
+            logger,
+            "env_snapshot_adb_failed",
+            level=logging.DEBUG,
+            reason=type(exc).__name__,
         )
-    except (OSError, subprocess.SubprocessError):
         return None
 
     if result.returncode != 0:

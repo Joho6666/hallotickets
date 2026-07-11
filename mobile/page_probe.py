@@ -117,6 +117,14 @@ _ACTIVITY_STATE_MAP = (
     ("SearchActivity", "search_page"),
 )
 
+# 详情页价格区容器候选（多版本兼容）：大麦 9.0.2x 详情页已移除
+# project_detail_price_layout，价格区改为 info_v2_price_layout（2026-07-11
+# 真机 dump 证实）。新 ID 在前，现网主流版本一次命中少一次元素查询。
+_DETAIL_PRICE_LAYOUT_IDS = (
+    "cn.damai:id/info_v2_price_layout",
+    "cn.damai:id/project_detail_price_layout",
+)
+
 # Default result template
 _DEFAULT_RESULT: Dict[str, Any] = {
     "state": "unknown",
@@ -331,7 +339,17 @@ class PageProbe:
             purchase_bar = self._exists_by_resource_id(
                 "cn.damai:id/trade_project_detail_purchase_status_bar_container_fl"
             )
-            return _make_result(state="detail_page", purchase_button=purchase_bar)
+            # price_container 不能停留在默认 False：probe_only 就绪判定
+            # （orchestrator）依赖它，否则安全探测在 detail_page 上永远「未就绪」。
+            # 本探测发生在开售等待之前，不在点击临界路径上。
+            price_layout = any(
+                self._exists_by_resource_id(rid) for rid in _DETAIL_PRICE_LAYOUT_IDS
+            )
+            return _make_result(
+                state="detail_page",
+                purchase_button=purchase_bar,
+                price_container=price_layout,
+            )
 
         if "NcovSku" in activity:
             if self._has_session_picker_markers():
@@ -396,8 +414,8 @@ class PageProbe:
         purchase_bar = self._exists_by_resource_id(
             "cn.damai:id/trade_project_detail_purchase_status_bar_container_fl"
         )
-        price_layout = self._exists_by_resource_id(
-            "cn.damai:id/project_detail_price_layout"
+        price_layout = any(
+            self._exists_by_resource_id(rid) for rid in _DETAIL_PRICE_LAYOUT_IDS
         )
         title_tv = self._exists_by_resource_id("cn.damai:id/title_tv")
         if purchase_bar or price_layout or title_tv:

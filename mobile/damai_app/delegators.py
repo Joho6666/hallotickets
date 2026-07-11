@@ -168,9 +168,11 @@ class DelegatorsMixin:
             return self._navigator._title_matches_target(title_text)
         return False
 
-    def _current_page_matches_target(self, page_probe):
+    def _current_page_matches_target(self, page_probe, clicked_title=None):
         if hasattr(self, "_navigator"):
-            return self._navigator._current_page_matches_target(page_probe)
+            return self._navigator._current_page_matches_target(
+                page_probe, clicked_title=clicked_title
+            )
         return False
 
     def _open_search_from_homepage(self):
@@ -183,10 +185,25 @@ class DelegatorsMixin:
             return self._navigator._submit_search_keyword()
         return False
 
-    def _score_search_result(self, title_text, venue_text):
+    def _score_search_result(self, title_text, venue_text, city_text=None):
         if hasattr(self, "_navigator"):
-            return self._navigator._score_search_result(title_text, venue_text)
+            return self._navigator._score_search_result(
+                title_text, venue_text, city_text
+            )
         return -1
+
+    @property
+    def _last_failed_candidates(self):
+        """discover_target_event 最终失败时缓存的 top-5 候选（只读）。
+
+        issue #51+#50：prompt_runner 在 discovery 为 None 时读取本属性，
+        在失败文案中列出候选引导用户补全标题。候选实际存放在
+        EventNavigator 上；无 navigator 或数据非法时兜底返回空列表。
+        """
+        if hasattr(self, "_navigator") and self._navigator is not None:
+            candidates = getattr(self._navigator, "_last_failed_candidates", [])
+            return candidates if isinstance(candidates, list) else []
+        return []
 
     def _scroll_search_results(self):
         if hasattr(self, "_navigator"):
