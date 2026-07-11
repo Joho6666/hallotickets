@@ -498,13 +498,30 @@ class TestSmartWaitAndClick:
 
 class TestAutoNavigation:
     def test_title_matches_target_with_keyword_tokens(self, bot):
+        # issue #51+#50 对抗审查修正 1：城市冲突 veto 落地后，fixture 的
+        # city="深圳" 会否决含「北京」的标题。本用例显式置 city=None，
+        # 单独锁定 token 命中路径；veto 行为由下一个用例正向固化。
         bot.config.keyword = "张杰 演唱会"
+        bot.config.city = None
 
         assert (
             bot._title_matches_target(
                 "【北京】2026张杰未·LIVE—「开往1982」演唱会-北京站"
             )
             is True
+        )
+
+    def test_title_matches_target_city_conflict_veto(self, bot):
+        # issue #50 反向风险收紧：目标城市深圳（fixture 默认）、标题北京站
+        # ——即便全 token 命中也必须被城市冲突 veto 拒绝
+        bot.config.keyword = "张杰 演唱会"
+        assert bot.config.city == "深圳"
+
+        assert (
+            bot._title_matches_target(
+                "【北京】2026张杰未·LIVE—「开往1982」演唱会-北京站"
+            )
+            is False
         )
 
     def test_current_page_matches_target_uses_keyword_when_item_detail_missing(
@@ -578,6 +595,54 @@ class TestAutoNavigation:
         assert result is not None
         exit_context.assert_called_once()
         submit_keyword.assert_called_once()
+
+    def test_discover_failure_exposes_candidates(self, bot):
+        # issue #51+#50：全部关键词失败时 discover 仍返回 None（契约不变），
+        # 但候选按 score 降序、标题去重（取高分）、top-5 缓存在
+        # bot._last_failed_candidates（只读 property → EventNavigator）
+        bot.config.keyword = "凤凰传奇 演唱会"
+        open_results = [
+            {
+                "opened": False,
+                "search_results": [
+                    {"title": "候选A", "city": "广州", "venue": "V1", "time": "T1", "score": 50},
+                    {"title": "候选B", "city": "广州", "venue": "V2", "time": "T2", "score": 40},
+                ],
+            },
+            {
+                "opened": False,
+                "search_results": [
+                    {"title": "候选A", "city": "广州", "venue": "V1", "time": "T1", "score": 70},
+                    {"title": "候选C", "city": "广州", "venue": "V3", "time": "T3", "score": 30},
+                ],
+            },
+        ]
+
+        with patch.object(
+            bot, "_recover_to_navigation_start", return_value={"state": "search_page"}
+        ):
+            with patch.object(bot, "_submit_search_keyword", return_value=True):
+                with patch.object(
+                    bot, "_open_target_from_search_results", side_effect=open_results
+                ):
+                    with patch.object(bot, "dismiss_startup_popups"):
+                        with patch.object(
+                            bot,
+                            "probe_current_page",
+                            return_value={"state": "search_page"},
+                        ):
+                            result = bot.discover_target_event(
+                                ["凤凰传奇 演唱会", "凤凰传奇"]
+                            )
+
+        assert result is None
+        candidates = bot._last_failed_candidates
+        assert isinstance(candidates, list)
+        assert len(candidates) <= 5
+        assert [item["title"] for item in candidates] == ["候选A", "候选B", "候选C"]
+        assert [item["score"] for item in candidates] == [70, 40, 30]
+        # 去重取高分的那条应来自第二个关键词轮次
+        assert candidates[0]["used_keyword"] == "凤凰传奇"
 
     def test_navigate_to_target_event_from_search_page(self, bot):
         with patch.object(
@@ -2031,6 +2096,27 @@ class TestPageStateHelpers:
                 assert result["state"] == "search_page"
                 assert result["purchase_button"] is False
 
+    def test_probe_current_page_detects_detail_page_by_new_price_layout(self, bot):
+        """9.0.2x 详情页价格区改为 info_v2_price_layout（issue #41 probe 侧面回归锁）。"""
+        present = {
+            (By.ID, "cn.damai:id/info_v2_price_layout"),
+        }
+
+        with patch.object(
+            bot,
+            "_has_element",
+            side_effect=lambda by, value: (by, value) in present,
+        ):
+            with patch.object(
+                bot,
+                "_get_current_activity",
+                return_value=".trade.newtradeorder.ui.projectdetail.ui.activity.ProjectDetailActivity",
+            ):
+                result = bot._probe_current_page_element_based()
+
+                assert result["state"] == "detail_page"
+                assert result["price_container"] is True
+
     def test_probe_current_page_detects_detail_page_by_activity_and_summary_price(
         self, bot
     ):
@@ -2434,6 +2520,172 @@ class TestWaitForSaleStart:
 
         is_ready.assert_not_called()
         mock_sleep.assert_not_called()
+
+    def test_wait_for_sale_start_canvas_fallback_returns_at_sale_time(
+        self, bot, caplog
+    ):
+        """Canvas 自绘 CTA（读不到任何文案）时，到点立即走坐标兜底返回（issue #41）。"""
+        _tz = timezone(timedelta(hours=8))
+        sell_time = datetime(2026, 6, 1, 20, 0, 10, tzinfo=_tz)
+        bot.config.sell_start_time = sell_time.isoformat()
+        bot.config.countdown_lead_ms = 3000
+
+        now_base = datetime(2026, 6, 1, 20, 0, 0, tzinfo=_tz)
+        now_calls = [0]
+
+        def mock_now(tz=None):
+            now_calls[0] += 1
+            if now_calls[0] == 1:
+                # 初始检查：开售前 10s
+                return now_base
+            # 轮询期间：刚过开售时刻（远早于 deadline = sell_time + 8s）
+            return sell_time + timedelta(milliseconds=100)
+
+        bot._guard = Mock()
+        bot._guard.get_current_text = Mock(return_value=None)
+        bot._guard.get_cta_center_coords = Mock(return_value=(794, 2617))
+        bot._guard._last_matched_resource_id = (
+            "cn.damai:id/trade_project_detail_purchase_status_bar_container_fl"
+        )
+
+        with caplog.at_level("INFO", logger="mobile.damai_app"):
+            with patch("mobile.damai_app.datetime") as mock_dt:
+                with patch("mobile.damai_app.time.sleep"):
+                    with patch.object(
+                        bot, "_is_sale_ready", return_value=False
+                    ) as is_ready:
+                        mock_dt.fromisoformat = datetime.fromisoformat
+                        mock_dt.now = mock_now
+                        bot.wait_for_sale_start()
+
+        # 到点即刻返回：不进入 _is_sale_ready 慢查询，也不烧到超时
+        is_ready.assert_not_called()
+        assert "event=cta_canvas_fallback" in caplog.text
+        assert "trade_project_detail_purchase_status_bar_container_fl" in caplog.text
+        assert "event=sale_wait_timeout" not in caplog.text
+
+    def test_wait_for_sale_start_canvas_skips_is_sale_ready_before_sale(
+        self, bot, caplog
+    ):
+        """Canvas 页开售前不跑昂贵的 _is_sale_ready，到点才坐标兜底（issue #41 收尾）。
+
+        回归锁：若开售前每轮都跑 _is_sale_ready，sell_time 落在某轮 in-flight 查询
+        期间会把开抢拖后 ~1 个周期（真机曾晚 ~2s）。本用例安排轮询在开售前先转两轮，
+        断言这两轮里 _is_sale_ready 一次都没被调用，且到点后走 cta_canvas_fallback。
+        """
+        _tz = timezone(timedelta(hours=8))
+        sell_time = datetime(2026, 6, 1, 20, 0, 10, tzinfo=_tz)
+        bot.config.sell_start_time = sell_time.isoformat()
+        bot.config.countdown_lead_ms = 3000
+
+        now_base = datetime(2026, 6, 1, 20, 0, 0, tzinfo=_tz)
+        # 初始「已过?」检查 → 开售前 10s；随后两轮仍在开售前；最后越过开售时刻。
+        now_seq = iter(
+            [
+                now_base,
+                sell_time - timedelta(seconds=2),
+                sell_time - timedelta(seconds=1),
+                sell_time + timedelta(milliseconds=80),
+            ]
+        )
+        last_now = [now_base]
+
+        def mock_now(tz=None):
+            try:
+                last_now[0] = next(now_seq)
+            except StopIteration:
+                pass
+            return last_now[0]
+
+        bot._guard = Mock()
+        bot._guard.get_current_text = Mock(return_value=None)
+        bot._guard.get_cta_center_coords = Mock(return_value=(794, 2617))
+        bot._guard._last_matched_resource_id = (
+            "cn.damai:id/trade_project_detail_purchase_status_bar_container_fl"
+        )
+
+        with caplog.at_level("INFO", logger="mobile.damai_app"):
+            with patch("mobile.damai_app.datetime") as mock_dt:
+                with patch("mobile.damai_app.time.sleep"):
+                    with patch.object(
+                        bot, "_is_sale_ready", return_value=False
+                    ) as is_ready:
+                        mock_dt.fromisoformat = datetime.fromisoformat
+                        mock_dt.now = mock_now
+                        bot.wait_for_sale_start()
+
+        # 开售前两轮 + 到点那轮，_is_sale_ready 全程未被调用
+        is_ready.assert_not_called()
+        assert "event=cta_canvas_fallback" in caplog.text
+        assert "event=sale_wait_timeout" not in caplog.text
+
+    def test_wait_for_sale_start_guard_text_early_return(self, bot, caplog):
+        """v8.x 文案路径回归：guard 读到安全文案即刻返回，不进慢轮询。"""
+        _tz = timezone(timedelta(hours=8))
+        sell_time = datetime(2026, 6, 1, 20, 0, 10, tzinfo=_tz)
+        bot.config.sell_start_time = sell_time.isoformat()
+        bot.config.countdown_lead_ms = 3000
+
+        now_base = datetime(2026, 6, 1, 20, 0, 0, tzinfo=_tz)
+
+        bot._guard = Mock()
+        bot._guard.get_current_text = Mock(return_value="立即购票")
+        bot._guard.is_safe_to_click = Mock(return_value=True)
+
+        with caplog.at_level("INFO", logger="mobile.damai_app"):
+            with patch("mobile.damai_app.datetime") as mock_dt:
+                with patch("mobile.damai_app.time.sleep"):
+                    with patch.object(
+                        bot, "_is_sale_ready", return_value=False
+                    ) as is_ready:
+                        mock_dt.fromisoformat = datetime.fromisoformat
+                        mock_dt.now = lambda tz=None: now_base
+                        bot.wait_for_sale_start()
+
+        is_ready.assert_not_called()
+        # 文案在手，无需坐标兜底
+        bot._guard.get_cta_center_coords.assert_not_called()
+        assert "event=sale_ready" in caplog.text
+        assert "source=buy_button_guard" in caplog.text
+        assert "cta_text=立即购票" in caplog.text
+
+    def test_wait_for_sale_start_timeout_when_nothing_found(self, bot, caplog):
+        """全信号落空（无文案、无坐标、无结构信号）时保留原超时行为。"""
+        _tz = timezone(timedelta(hours=8))
+        sell_time = datetime(2026, 6, 1, 20, 0, 10, tzinfo=_tz)
+        bot.config.sell_start_time = sell_time.isoformat()
+        bot.config.countdown_lead_ms = 3000
+
+        now_base = datetime(2026, 6, 1, 20, 0, 0, tzinfo=_tz)
+        now_calls = [0]
+
+        def mock_now(tz=None):
+            now_calls[0] += 1
+            if now_calls[0] == 1:
+                return now_base
+            if now_calls[0] == 2:
+                # 第一轮：已过开售时刻但仍在 deadline 内
+                return sell_time + timedelta(seconds=1)
+            # 之后越过 deadline（sell_time + 8s），触发超时
+            return sell_time + timedelta(seconds=9)
+
+        bot._guard = Mock()
+        bot._guard.get_current_text = Mock(return_value=None)
+        bot._guard.get_cta_center_coords = Mock(return_value=None)
+
+        with caplog.at_level("INFO", logger="mobile.damai_app"):
+            with patch("mobile.damai_app.datetime") as mock_dt:
+                with patch("mobile.damai_app.time.sleep"):
+                    with patch.object(
+                        bot, "_is_sale_ready", return_value=False
+                    ) as is_ready:
+                        mock_dt.fromisoformat = datetime.fromisoformat
+                        mock_dt.now = mock_now
+                        bot.wait_for_sale_start()
+
+        assert "event=sale_wait_timeout" in caplog.text
+        is_ready.assert_called()
+        bot._guard.get_cta_center_coords.assert_called()
 
     def test_prepare_detail_page_hot_path_preselects_date_and_city(self, bot):
         with patch.object(
@@ -4829,9 +5081,13 @@ class TestSaleReadyTexts:
             # During polling: stay before deadline so the loop can run at least once
             return now_base
 
-        # BuyButtonGuard NOT used in this test path
+        # BuyButtonGuard NOT used in this test path —— issue #41 后 guard 以
+        # get_current_text/get_cta_center_coords 参与交错轮询（不再串行调用
+        # wait_until_safe），Mock 默认返回 truthy Mock 会误触发文案早退，这里
+        # 显式置空让本用例聚焦 _is_sale_ready 的文案轮询路径。
         bot._guard = Mock()
-        bot._guard.wait_until_safe = Mock(return_value=False)
+        bot._guard.get_current_text = Mock(return_value=None)
+        bot._guard.get_cta_center_coords = Mock(return_value=None)
 
         # _has_element returns True only for textContains("立即预订")
         def has_element(by, value):
@@ -4856,6 +5112,89 @@ class TestSaleReadyTexts:
             f"wait_for_sale_start should detect 立即预订 quickly, took {wall_elapsed:.3f}s"
         )
         assert getattr(bot, "_last_sale_ready_text", None) == "立即预订"
+
+
+# ---------------------------------------------------------------------------
+# _is_buy_button_sold_out — issue #41 多 ID 候选与文档序防御
+# ---------------------------------------------------------------------------
+
+
+class TestIsBuyButtonSoldOut:
+    """_is_buy_button_sold_out：优先 btn_buy_view，容器仅作回退且不误判 Canvas。"""
+
+    _CONTAINER_ID = "cn.damai:id/trade_project_detail_purchase_status_bar_container_fl"
+
+    def test_legacy_btn_sold_out_returns_true(self, bot):
+        """老结构回归：btn_buy_view 显示缺货 → True。"""
+        bot.d.dump_hierarchy = Mock(
+            return_value=(
+                '<hierarchy><node resource-id="cn.damai:id/btn_buy_view" '
+                'text="缺货登记" content-desc="" /></hierarchy>'
+            )
+        )
+        assert bot._is_buy_button_sold_out() is True
+
+    def test_btn_inside_container_not_shadowed_by_document_order(self, bot):
+        """文档序陷阱防御：容器（空文案）是 btn_buy_view 的祖先、先被遍历到，
+        仍必须读到子节点 btn_buy_view 的缺货文案（verdict 修正 4）。"""
+        bot.d.dump_hierarchy = Mock(
+            return_value=(
+                "<hierarchy>"
+                f'<node resource-id="{self._CONTAINER_ID}" text="" content-desc="">'
+                '<node resource-id="cn.damai:id/btn_buy_view" '
+                'text="缺货登记" content-desc="" />'
+                "</node></hierarchy>"
+            )
+        )
+        assert bot._is_buy_button_sold_out() is True
+
+    def test_btn_priority_over_container_text(self, bot):
+        """btn_buy_view 存在且可购时，容器文案不参与判定。"""
+        bot.d.dump_hierarchy = Mock(
+            return_value=(
+                "<hierarchy>"
+                f'<node resource-id="{self._CONTAINER_ID}" text="缺货登记" '
+                'content-desc="">'
+                '<node resource-id="cn.damai:id/btn_buy_view" '
+                'text="立即购买" content-desc="" />'
+                "</node></hierarchy>"
+            )
+        )
+        assert bot._is_buy_button_sold_out() is False
+
+    def test_container_sold_out_returns_true_without_btn(self, bot):
+        """≥9.0.2x：btn_buy_view 不存在时回退容器，容器带缺货文案 → True。"""
+        bot.d.dump_hierarchy = Mock(
+            return_value=(
+                "<hierarchy>"
+                f'<node resource-id="{self._CONTAINER_ID}" text="缺货登记" '
+                'content-desc="" />'
+                "</hierarchy>"
+            )
+        )
+        assert bot._is_buy_button_sold_out() is True
+
+    def test_canvas_container_empty_text_returns_false(self, bot):
+        """≥9.0.2x Canvas 容器（text/content-desc 均空）→ False，不误判缺货。"""
+        bot.d.dump_hierarchy = Mock(
+            return_value=(
+                "<hierarchy>"
+                f'<node resource-id="{self._CONTAINER_ID}" text="" content-desc="">'
+                '<node resource-id="" text="" content-desc="" />'
+                "</node></hierarchy>"
+            )
+        )
+        assert bot._is_buy_button_sold_out() is False
+
+    def test_no_candidate_nodes_returns_false(self, bot):
+        bot.d.dump_hierarchy = Mock(
+            return_value='<hierarchy><node resource-id="other" text="缺货" /></hierarchy>'
+        )
+        assert bot._is_buy_button_sold_out() is False
+
+    def test_dump_failure_returns_false(self, bot):
+        bot.d.dump_hierarchy = Mock(side_effect=RuntimeError("device gone"))
+        assert bot._is_buy_button_sold_out() is False
 
 
 # ---------------------------------------------------------------------------

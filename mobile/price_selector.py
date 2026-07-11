@@ -846,6 +846,8 @@ class PriceSelector:
 
             candidates = []
             for variant_name, crop_rect, extra_args in crop_variants:
+                # bytes 模式（不消费 stdout），勿改为 text=True——Windows GBK
+                # locale 下会触发解码问题（见 issue #50 / mobile/proc_utils.py）。
                 subprocess.run(
                     [
                         _MAGICK_BIN,
@@ -863,6 +865,8 @@ class PriceSelector:
                 )
 
                 for psm in ("13", "7", "11", "6"):
+                    # bytes 模式，解码在下方 result.stdout.decode("utf-8", "ignore")
+                    # 显式完成，勿改为 text=True（Windows GBK 兼容，见 issue #50）。
                     result = subprocess.run(
                         [
                             _TESSERACT_BIN,

@@ -63,6 +63,10 @@ class TestDetectDamaiAppVersion:
 # ---------------------------------------------------------------------------
 # _run_adb_pm_dump — real-ish behavior with mocked subprocess
 #
+# NOTE: patch 目标是 "mobile.proc_utils.subprocess.run"——env_snapshot 已经改为
+# 经 mobile.proc_utils.run_captured 调用 subprocess（issue #50 UTF-8 修复），
+# patch env_snapshot 内的 subprocess 将绕过 mock 真实执行 adb。
+#
 # NOTE: Avoid Python 3.10's parenthesised ``with (..., ...)`` syntax to keep
 # the suite parseable on the project's Python 3.8 baseline.
 # ---------------------------------------------------------------------------
@@ -79,7 +83,7 @@ class TestRunAdbPmDump:
         )
         with patch("mobile.env_snapshot.shutil.which", return_value="/usr/bin/adb"):
             with patch(
-                "mobile.env_snapshot.subprocess.run", return_value=completed
+                "mobile.proc_utils.subprocess.run", return_value=completed
             ) as mock_run:
                 assert _run_adb_pm_dump(serial=None) == "versionName=1.2.3"
         cmd = mock_run.call_args.args[0]
@@ -91,7 +95,7 @@ class TestRunAdbPmDump:
         )
         with patch("mobile.env_snapshot.shutil.which", return_value="/usr/bin/adb"):
             with patch(
-                "mobile.env_snapshot.subprocess.run", return_value=completed
+                "mobile.proc_utils.subprocess.run", return_value=completed
             ) as mock_run:
                 _run_adb_pm_dump(serial="dev1")
         cmd = mock_run.call_args.args[0]
@@ -102,13 +106,13 @@ class TestRunAdbPmDump:
             args=["adb"], returncode=1, stdout="", stderr="error"
         )
         with patch("mobile.env_snapshot.shutil.which", return_value="/usr/bin/adb"):
-            with patch("mobile.env_snapshot.subprocess.run", return_value=completed):
+            with patch("mobile.proc_utils.subprocess.run", return_value=completed):
                 assert _run_adb_pm_dump() is None
 
     def test_returns_none_on_subprocess_timeout(self):
         with patch("mobile.env_snapshot.shutil.which", return_value="/usr/bin/adb"):
             with patch(
-                "mobile.env_snapshot.subprocess.run",
+                "mobile.proc_utils.subprocess.run",
                 side_effect=subprocess.TimeoutExpired(cmd="adb", timeout=3.0),
             ):
                 assert _run_adb_pm_dump() is None
@@ -116,7 +120,7 @@ class TestRunAdbPmDump:
     def test_returns_none_on_oserror(self):
         with patch("mobile.env_snapshot.shutil.which", return_value="/usr/bin/adb"):
             with patch(
-                "mobile.env_snapshot.subprocess.run",
+                "mobile.proc_utils.subprocess.run",
                 side_effect=FileNotFoundError("adb missing at runtime"),
             ):
                 assert _run_adb_pm_dump() is None
@@ -126,7 +130,32 @@ class TestRunAdbPmDump:
             args=["adb"], returncode=0, stdout="", stderr=""
         )
         with patch("mobile.env_snapshot.shutil.which", return_value="/usr/bin/adb"):
-            with patch("mobile.env_snapshot.subprocess.run", return_value=completed):
+            with patch("mobile.proc_utils.subprocess.run", return_value=completed):
+                assert _run_adb_pm_dump() is None
+
+    def test_pm_dump_passes_utf8_encoding(self):
+        """issue #50 回归锁：pm dump 必须显式 encoding=utf-8 + errors=replace。"""
+        completed = subprocess.CompletedProcess(
+            args=["adb"], returncode=0, stdout="versionName=9.0.26", stderr=""
+        )
+        with patch("mobile.env_snapshot.shutil.which", return_value="/usr/bin/adb"):
+            with patch(
+                "mobile.proc_utils.subprocess.run", return_value=completed
+            ) as mock_run:
+                assert _run_adb_pm_dump(serial="c6c4eb67") == "versionName=9.0.26"
+        kwargs = mock_run.call_args.kwargs
+        assert kwargs["encoding"] == "utf-8"
+        assert kwargs["errors"] == "replace"
+
+    def test_pm_dump_returns_none_on_unicode_decode_error(self):
+        """模拟 Windows GBK 解码崩溃语义：UnicodeDecodeError → None 不抛异常。"""
+        with patch("mobile.env_snapshot.shutil.which", return_value="/usr/bin/adb"):
+            with patch(
+                "mobile.proc_utils.subprocess.run",
+                side_effect=UnicodeDecodeError(
+                    "gbk", b"\xa7", 0, 1, "illegal multibyte sequence"
+                ),
+            ):
                 assert _run_adb_pm_dump() is None
 
 

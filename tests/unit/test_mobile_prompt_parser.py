@@ -11,7 +11,9 @@ from mobile.prompt_parser import (
     _parse_city,
     _parse_date,
     _parse_price_hints,
+    _parse_price_range,
     _parse_quantity,
+    _strip_schedule_fragments,
     choose_price_option,
     is_price_option_available,
     parse_prompt,
@@ -70,6 +72,9 @@ class TestParsePrompt:
         assert intent.city == "成都"
         assert intent.date == "04.18"
         assert intent.artist == "顽童mj116"
+        # issue #45：斜杠日期「4/18」不再被误报为 18 元票价（显式契约固化）
+        assert intent.numeric_price_hint is None
+        assert intent.price_hint is None
 
     def test_parse_prompt_extracts_single_attendee_name(self):
         intent = parse_prompt(
@@ -157,6 +162,64 @@ class TestParsePrompt:
         assert intent.quantity_explicit is True
         assert any("观演人" in note and "购票张数" in note for note in intent.notes)
 
+    def test_parse_prompt_single_digit_day_price_regression(self):
+        # issue #45 回归对照组：单位数日「4月4号」修复前后都必须解析出 1080
+        intent = parse_prompt(
+            "帮张志涛抢一张 4 月 4 号余佳运的演唱会门票，内场，票价 1080 元"
+        )
+
+        assert intent.numeric_price_hint == 1080
+        assert intent.price_hint == "内场1080元"
+
+    def test_full_title_candidate_keeps_city(self):
+        # issue #51 回归：城市全局 replace 把标题前缀「龙拳·北京」挖成「龙拳·」。
+        # 修复后新增「保留城市版」完整短语候选（index=2），城市名保留在候选内；
+        # candidate_keywords[:2] 顺序锁定不破坏。
+        # 注：#45 修复已把「2026」识别为票价 token 并进入 removable_tokens，
+        # 因此本工作区现状下前两候选为 ['周杰伦 演唱会','周杰伦']（而非
+        # 分析报告成文时的 '嘉年华2026周杰伦 演唱会' 系列）。
+        intent = parse_prompt("给xxx抢6月28号 龙拳·北京 嘉年华2026周杰伦演唱会")
+
+        assert intent.candidate_keywords[:2] == ["周杰伦 演唱会", "周杰伦"]
+        assert "龙拳·北京" in intent.candidate_keywords[2]
+        # 修复前的残缺形态「龙拳· 」不再是唯一保留（保留城市版必须存在）
+        assert any("龙拳·北京" in kw for kw in intent.candidate_keywords)
+
+    def test_full_title_candidate_keeps_city_issue50(self):
+        # issue #50 同族：城市写在演出短语外时，保留城市版候选含「广州」
+        intent = parse_prompt("帮张三抢广州的凤凰传奇演唱会门票")
+
+        assert intent.candidate_keywords[:2] == ["凤凰传奇 演唱会", "凤凰传奇"]
+        assert any("广州" in kw for kw in intent.candidate_keywords)
+
+    def test_city_preserving_candidate_absent_without_city(self):
+        # 无城市的提示词：候选列表行为与修复前一致（不新增候选）
+        intent = parse_prompt("帮我抢一张 4 月 6 号张杰的演唱会门票，内场")
+
+        assert intent.candidate_keywords[:2] == ["张杰 演唱会", "张杰"]
+
+    def test_parse_prompt_e2e_issue45(self):
+        # issue #45 端到端：两位数日份「30」不再吞并票价 1380
+        result = parse_prompt(
+            "帮张三抢一张 5月30号 陈奕迅的演唱会门票，内场，票价1380元"
+        )
+
+        assert result.numeric_price_hint == 1380
+        assert result.price_hint == "内场1380元"
+        assert result.date == "05.30"
+        assert result.artist == "陈奕迅"
+        assert result.search_keyword == "陈奕迅 演唱会"
+        # 可观测性（对抗审查修正 #1）：剥离事件写入 notes（summary「提示:」段
+        # 会打印）与 diagnostics 两个通道
+        assert any(
+            "price_parse.schedule_fragments_stripped" in note
+            for note in result.notes
+        )
+        assert any(
+            "price_parse.schedule_fragments_stripped" in item
+            for item in result.diagnostics
+        )
+
 
 class TestPromptParserInternals:
     def test_parse_chinese_int_variants(self):
@@ -203,6 +266,22 @@ class TestChoosePriceOption:
         selected = choose_price_option(intent, options)
 
         assert selected is None
+
+    def test_choose_price_option_after_issue45_fix(self):
+        # issue #45 下游修复验证：票价 1380 精确命中（+100），
+        # 而非修复前 seat 文字掩盖或最近邻全拒返回 None
+        intent = parse_prompt(
+            "帮张三抢一张 5月30号 陈奕迅的演唱会门票，内场，票价1380元"
+        )
+        options = [
+            {"index": 0, "text": "580元", "tag": "可预约"},
+            {"index": 1, "text": "1380元", "tag": "可预约"},
+        ]
+
+        selected = choose_price_option(intent, options)
+
+        assert selected is not None
+        assert selected["index"] == 1
 
 
 # ---------------------------------------------------------------------------
@@ -387,6 +466,133 @@ class TestParsePriceHints:
         hint, seat, numeric = _parse_price_hints("前排VIP1680")
         assert seat == "VIP"
         assert numeric == 1680
+
+    # -- issue #45：日期/时间/张数数字不再被误判为票价 ----------------------
+
+    def test_parse_price_hints_ignores_two_digit_day_before_price(self):
+        # issue #45 场景 1：修复前「5月30号」的日份 30 抢先命中，误报 内场30元
+        hint, seat, numeric = _parse_price_hints(
+            "帮张三抢一张 5月30号 陈奕迅的演唱会门票，内场，票价1380元"
+        )
+        assert hint == "内场1380元"
+        assert seat == "内场"
+        assert numeric == 1380
+
+    def test_parse_price_hints_ignores_day_23_with_bare_price(self):
+        # issue #45 场景 2（980→23 截图案例）：修复前返回 ('23元', None, 23)
+        hint, seat, numeric = _parse_price_hints(
+            "帮李四抢一张 5月23号 周杰伦的演唱会门票 980元"
+        )
+        assert hint == "980元"
+        assert seat is None
+        assert numeric == 980
+
+    def test_parse_price_hints_ignores_time_tokens(self):
+        # 开抢时间「23点」「23:00」同为 issue #45 根因形态，修复前均误报 23
+        _, _, numeric_dian = _parse_price_hints(
+            "5月8号 23点开抢 周杰伦演唱会 980元"
+        )
+        _, _, numeric_colon = _parse_price_hints(
+            "5月8号 23:00开抢 周杰伦演唱会 980元"
+        )
+        assert numeric_dian == 980
+        assert numeric_colon == 980
+
+    def test_parse_price_hints_ignores_quantity_digits(self):
+        # 张数「12张」修复前被误吃为 12 元
+        _, _, numeric = _parse_price_hints("帮我抢12张 5月30号 演唱会 580元")
+        assert numeric == 580
+
+    def test_parse_price_hints_ignores_year_token(self):
+        _, _, numeric = _parse_price_hints("2026年5月30号 张杰演唱会 票价1380元")
+        assert numeric == 1380
+
+    def test_parse_price_hints_ignores_slash_date_and_alnum_artist(self):
+        # 斜杠日期「4/18」不误报 18 元；艺人名「mj116」里的 116 不被宽松层误吃
+        hint, seat, numeric = _parse_price_hints(
+            "帮我抢两张 成都站 4/18 顽童mj116 演唱会"
+        )
+        assert hint is None
+        assert seat is None
+        assert numeric is None
+
+    def test_parse_price_hints_context_anchor_beats_leading_bare_number(self):
+        # Tier1 上下文锚定（票价…）优先于位置更靠前的 Tier2 裸数字
+        _, _, numeric = _parse_price_hints("编号45 张杰演唱会 票价1380元")
+        assert numeric == 1380
+
+    def test_parse_price_hints_keeps_seat_adjacent_digits(self):
+        # 回归保护：seat token 预剥离不破坏「seat 紧贴数字」的既有行为
+        hint, seat, numeric = _parse_price_hints("前排VIP1680")
+        assert (hint, seat, numeric) == ("VIP1680元", "VIP", 1680)
+
+        hint, seat, numeric = _parse_price_hints("内场280")
+        assert (hint, seat, numeric) == ("内场280元", "内场", 280)
+
+        hint, seat, numeric = _parse_price_hints("看台票 899")
+        assert seat == "看台"
+        assert numeric == 899
+
+    def test_parse_price_hints_no_backtrack_truncation(self):
+        # 对抗审查实锤缺陷回归：无 (?!\d) 时「1380号」会贪婪回溯成「138」
+        # 骗过负向 lookahead；修复后三位以上数字紧跟单位必须整体排除
+        hint, seat, numeric = _parse_price_hints("1380号 张杰演唱会")
+        assert hint is None
+        assert seat is None
+        assert numeric is None
+
+        # 两位数紧跟单位（30号 / 25分）同样排除
+        assert _parse_price_hints("30号 张杰演唱会")[2] is None
+        assert _parse_price_hints("开抢25分 张杰演唱会")[2] is None
+
+    def test_parse_price_hints_bare_year_with_anchor(self):
+        # 裸年份（无「年」字）依赖 Tier1 锚定词兜底，不被误报为票价
+        _, _, numeric = _parse_price_hints("张杰2024巡演 票价680元")
+        assert numeric == 680
+
+    def test_parse_price_hints_currency_symbol_anchor(self):
+        # Tier1 货币符号锚定：¥/￥ 后的数字优先于日期残余
+        _, _, numeric = _parse_price_hints("5月30号 张杰演唱会 ¥1380")
+        assert numeric == 1380
+
+
+# ---------------------------------------------------------------------------
+# _parse_price_range（issue #45 同族缺陷：短横线日期 vs 价格区间）
+# ---------------------------------------------------------------------------
+
+
+class TestParsePriceRange:
+    def test_parse_price_range_survives_date_prefix(self):
+        assert _parse_price_range("5月30号 500-800元") == (500, 800)
+
+    def test_parse_price_range_not_fooled_by_dash_date(self):
+        # 修复前「12-15」短横线日期被误判为 (12, 15) 价格区间
+        assert _parse_price_range("12-15 张杰演唱会") == (None, None)
+
+    def test_parse_price_range_keeps_two_digit_range(self):
+        # 50 不是合法月份，两位数价格区间不被日期剥离误伤
+        assert _parse_price_range("50-80元") == (50, 80)
+
+
+# ---------------------------------------------------------------------------
+# _strip_schedule_fragments
+# ---------------------------------------------------------------------------
+
+
+class TestStripScheduleFragments:
+    def test_strip_schedule_fragments_preserves_range_interior_digits(self):
+        # 数字边界 lookaround 防误吃：区间内部的「80-13」不能被当短日期剥掉
+        assert "980-1380元" in _strip_schedule_fragments("980-1380元")
+
+    def test_strip_schedule_fragments_removes_schedule_tokens(self):
+        stripped = _strip_schedule_fragments(
+            "2026年5月30号 2026-04-06 23:00 19点30分 抢12张 4/18"
+        )
+        assert not any(ch.isdigit() for ch in stripped)
+
+    def test_strip_schedule_fragments_keeps_invalid_month_pair(self):
+        # 50-80 不是合法「月-日」，必须原样保留
+        assert "50-80" in _strip_schedule_fragments("50-80元")
 
 
 # ---------------------------------------------------------------------------

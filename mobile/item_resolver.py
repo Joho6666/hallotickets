@@ -7,6 +7,7 @@ import hashlib
 import json
 import re
 import time
+from collections import Counter
 from dataclasses import dataclass
 from http.cookiejar import CookieJar
 from typing import Optional
@@ -73,6 +74,130 @@ def city_keyword(city_name: Optional[str]) -> str:
     if not city_name:
         return ""
     return re.sub(r"(特别行政区|自治州|地区|盟|市)$", "", city_name.strip())
+
+
+# 已知城市 token 全集（issue #51+#50：自 mobile/prompt_parser.py 迁入，
+# prompt_parser 通过别名 ``_KNOWN_CITY_TOKENS`` 保持向后兼容）。
+KNOWN_CITY_TOKENS = (
+    "北京",
+    "上海",
+    "深圳",
+    "广州",
+    "杭州",
+    "成都",
+    "重庆",
+    "武汉",
+    "南京",
+    "西安",
+    "苏州",
+    "天津",
+    "长沙",
+    "郑州",
+    "青岛",
+    "宁波",
+    "福州",
+    "厦门",
+    "南昌",
+    "沈阳",
+    "大连",
+    "合肥",
+    "无锡",
+    "佛山",
+    "东莞",
+    "珠海",
+    "昆明",
+    "贵阳",
+    "南宁",
+    "长春",
+    "哈尔滨",
+    "太原",
+    "石家庄",
+    "济南",
+    "兰州",
+    "海口",
+    "三亚",
+    "乌鲁木齐",
+    "呼和浩特",
+)
+
+
+def _char_bigram_counts(text: str) -> Counter:
+    """字符 bigram 多重集（multiset 口径，对抗审查修正 3b 钉死）。"""
+    return Counter(text[i : i + 2] for i in range(len(text) - 1))
+
+
+def title_similarity(candidate: str, title: str) -> float:
+    """计算候选串与标题的模糊相似度（issue #51+#50 搜索/标题匹配修复核心）。
+
+    规则（离线校准，校准值见 tests/unit/test_mobile_item_resolver.py）：
+
+    1. 双方经 :func:`normalize_text` 归一化，任一为空返回 ``0.0``；
+    2. 互为连续子串返回 ``1.0``（与既有精确路径语义一致）；
+    3. 否则返回 ``0.5 * 字符覆盖率 + 0.5 * 字符 bigram Dice 系数``，
+       两项均按 multiset（重复字符计次）口径统计。
+
+    校准参考：同事件词序颠倒 0.870、官方词序变体 0.823、省略号截断 0.854、
+    无关演出 <= 0.31。纯函数、无外部依赖。
+    """
+    if not isinstance(candidate, str) or not isinstance(title, str):
+        # 防御：MagicMock/None 等非字符串输入一律视为不相似
+        return 0.0
+
+    normalized_candidate = normalize_text(candidate)
+    normalized_title = normalize_text(title)
+    if not normalized_candidate or not normalized_title:
+        return 0.0
+    if (
+        normalized_candidate in normalized_title
+        or normalized_title in normalized_candidate
+    ):
+        return 1.0
+
+    # 字符覆盖率：candidate 字符被 title 覆盖的比例（multiset）
+    title_chars = Counter(normalized_title)
+    covered = sum(
+        min(count, title_chars.get(char, 0))
+        for char, count in Counter(normalized_candidate).items()
+    )
+    coverage = covered / len(normalized_candidate)
+
+    # 字符 bigram Dice 系数（multiset）
+    candidate_bigrams = _char_bigram_counts(normalized_candidate)
+    title_bigrams = _char_bigram_counts(normalized_title)
+    overlap = sum(
+        min(count, title_bigrams.get(bigram, 0))
+        for bigram, count in candidate_bigrams.items()
+    )
+    total = sum(candidate_bigrams.values()) + sum(title_bigrams.values())
+    dice = (2 * overlap / total) if total else 0.0
+
+    return 0.5 * coverage + 0.5 * dice
+
+
+def find_conflicting_city(text: Optional[str], target_city: Optional[str]) -> Optional[str]:
+    """返回 ``text`` 中出现的第一个不等于 ``target_city`` 的已知城市 token。
+
+    ``target_city`` 本身也出现在 ``text`` 中时返回 ``None``，避免
+    「北京·上海联演」这类多城市文案被误伤（issue #50 错城市 veto 依据）。
+    任一入参为空/非字符串时返回 ``None``。
+    """
+    if not isinstance(text, str) or not isinstance(target_city, str):
+        return None
+
+    normalized_text = normalize_text(text)
+    normalized_target = normalize_text(city_keyword(target_city))
+    if not normalized_text or not normalized_target:
+        return None
+    if normalized_target in normalized_text:
+        return None
+
+    for city in KNOWN_CITY_TOKENS:
+        normalized_city = normalize_text(city)
+        if normalized_city == normalized_target:
+            continue
+        if normalized_city in normalized_text:
+            return city
+    return None
 
 
 def build_search_keyword(

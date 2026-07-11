@@ -8,13 +8,16 @@ from unittest.mock import Mock, patch, MagicMock
 import pytest
 
 from mobile.item_resolver import (
+    KNOWN_CITY_TOKENS,
     DamaiItemDetail,
     DamaiItemResolveError,
     DamaiItemResolver,
     build_search_keyword,
     city_keyword,
     extract_item_id,
+    find_conflicting_city,
     normalize_text,
+    title_similarity,
 )
 
 
@@ -328,3 +331,105 @@ class TestDamaiItemResolver:
 
         with patch.object(resolver, "_request", return_value="ok"):
             assert resolver._prime_token("123", "https://referer.example", "{}") == "token"
+
+
+# ---------------------------------------------------------------------------
+# title_similarity（issue #51+#50：搜索/标题模糊匹配核心纯函数）
+# ---------------------------------------------------------------------------
+
+
+class TestTitleSimilarity:
+    """校准值按 multiset 口径钉死（对抗审查修正 3b），用 pytest.approx 锁定。"""
+
+    _KEYWORD = "嘉年华2026周杰伦演唱会"
+
+    def test_title_similarity_substring_is_one(self):
+        assert (
+            title_similarity(self._KEYWORD, "龙拳·北京 嘉年华2026周杰伦演唱会")
+            == 1.0
+        )
+
+    def test_title_similarity_reverse_substring_is_one(self):
+        # 短标题是候选串的子串（详情页短标题场景）同样返回 1.0
+        assert title_similarity("龙拳·北京 嘉年华", "龙拳北京嘉年华2026") == 1.0
+
+    def test_title_similarity_word_order_variant(self):
+        # issue #51：词序颠倒（校准值 0.870）
+        similarity = title_similarity(
+            self._KEYWORD, "周杰伦嘉年华2026演唱会（北京站）"
+        )
+        assert similarity >= 0.75
+        assert similarity == pytest.approx(0.870, abs=1e-3)
+
+    def test_title_similarity_official_word_order(self):
+        # issue #51：官方全称词序变体（校准值 0.823）
+        similarity = title_similarity(
+            self._KEYWORD, "2026周杰伦嘉年华世界巡回演唱会-北京站"
+        )
+        assert similarity >= 0.75
+        assert similarity == pytest.approx(0.823, abs=1e-3)
+
+    def test_title_similarity_truncated_ellipsis(self):
+        # issue #51：UI 省略号截断（multiset 校准值 0.854）
+        similarity = title_similarity(
+            self._KEYWORD, "龙拳·北京 嘉年华2026周杰伦演唱…"
+        )
+        assert similarity >= 0.75
+        assert similarity == pytest.approx(0.854, abs=1e-3)
+
+    def test_title_similarity_unrelated_low(self):
+        # 防放松过度：无关演出必须显著低于模糊阈值
+        assert title_similarity(self._KEYWORD, "开心麻花爆笑舞台剧") == 0.0
+        assert title_similarity(self._KEYWORD, "张学友60+巡回演唱会北京站") < 0.45
+
+    def test_title_similarity_issue50_tour_wording(self):
+        # issue #50：「巡演」写法（校准值 0.482，须过相似度加分门槛 0.45）
+        similarity = title_similarity(
+            "凤凰传奇 演唱会", "凤凰传奇「吉祥如意」2026巡演·广州站"
+        )
+        assert similarity == pytest.approx(0.482, abs=1e-3)
+        assert similarity >= 0.45
+
+    def test_title_similarity_same_city_unrelated_below_bonus_gate(self):
+        # 同城无关演出（校准值 0.314）不得触发相似度加分
+        similarity = title_similarity("凤凰传奇 演唱会", "五月天2026巡回演唱会广州站")
+        assert similarity == pytest.approx(0.314, abs=1e-3)
+        assert similarity < 0.45
+
+    def test_title_similarity_empty_or_non_string_returns_zero(self):
+        assert title_similarity("", "张杰演唱会") == 0.0
+        assert title_similarity("张杰演唱会", "") == 0.0
+        assert title_similarity(None, "张杰演唱会") == 0.0
+        assert title_similarity("张杰演唱会", MagicMock()) == 0.0
+
+
+# ---------------------------------------------------------------------------
+# find_conflicting_city（issue #50：错城市 veto 依据）
+# ---------------------------------------------------------------------------
+
+
+class TestFindConflictingCity:
+    def test_returns_conflicting_city(self):
+        assert find_conflicting_city("凤凰传奇巡回演唱会北京站", "广州") == "北京"
+
+    def test_target_city_present_returns_none(self):
+        assert find_conflicting_city("凤凰传奇巡回演唱会广州站", "广州") is None
+
+    def test_multi_city_copy_with_target_not_vetoed(self):
+        # 「北京·上海联演」类多城市文案：目标城市在文案中即不算冲突
+        assert find_conflicting_city("北京·上海联演", "上海") is None
+
+    def test_none_target_returns_none(self):
+        assert find_conflicting_city("张杰演唱会北京站", None) is None
+
+    def test_none_text_returns_none(self):
+        assert find_conflicting_city(None, "广州") is None
+
+    def test_city_suffix_stripped_from_target(self):
+        # target 带「市」后缀时按 city_keyword 归一（北京市 → 北京）
+        assert find_conflicting_city("张杰演唱会北京站", "北京市") is None
+
+    def test_known_city_tokens_exported(self):
+        # prompt_parser 迁移契约：城市全集从 item_resolver 导出
+        assert "北京" in KNOWN_CITY_TOKENS
+        assert "呼和浩特" in KNOWN_CITY_TOKENS

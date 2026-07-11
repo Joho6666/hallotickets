@@ -179,6 +179,71 @@ class TestFullProbe:
         assert result["state"] == "detail_page"
         assert result["purchase_button"] is True
 
+    def test_detail_page_fast_path_price_container_new_layout(self):
+        """9.0.2x 详情页价格区为 info_v2_price_layout，price_container 须为 True。
+
+        回归锁（issue #41 probe 侧面）：ProjectDetail 快路径曾不填 price_container，
+        导致 probe_only 就绪判定在 detail_page 上恒为「未就绪」。
+        """
+        device = _make_device("com.damai.ProjectDetailActivity")
+
+        def element_factory(**kwargs):
+            el = Mock()
+            el.exists = kwargs.get("resourceId", "") in (
+                "cn.damai:id/trade_project_detail_purchase_status_bar_container_fl",
+                "cn.damai:id/info_v2_price_layout",
+            )
+            return el
+
+        device.side_effect = element_factory
+        probe = PageProbe(device, cache_ttl_s=0)
+
+        result = probe.probe_current_page(fast=False)
+
+        assert result["state"] == "detail_page"
+        assert result["purchase_button"] is True
+        assert result["price_container"] is True
+
+    def test_detail_page_fast_path_price_container_legacy_layout(self):
+        """v8.x 详情页仍用 project_detail_price_layout，多 ID 候选保持兼容。"""
+        device = _make_device("com.damai.ProjectDetailActivity")
+
+        def element_factory(**kwargs):
+            el = Mock()
+            el.exists = kwargs.get("resourceId", "") in (
+                "cn.damai:id/trade_project_detail_purchase_status_bar_container_fl",
+                "cn.damai:id/project_detail_price_layout",
+            )
+            return el
+
+        device.side_effect = element_factory
+        probe = PageProbe(device, cache_ttl_s=0)
+
+        result = probe.probe_current_page(fast=False)
+
+        assert result["state"] == "detail_page"
+        assert result["price_container"] is True
+
+    def test_detail_page_fast_path_price_container_absent(self):
+        """无任何价格区锚点时 price_container 保持 False（probe_only 判未就绪）。"""
+        device = _make_device("com.damai.ProjectDetailActivity")
+
+        def element_factory(**kwargs):
+            el = Mock()
+            el.exists = (
+                kwargs.get("resourceId", "")
+                == "cn.damai:id/trade_project_detail_purchase_status_bar_container_fl"
+            )
+            return el
+
+        device.side_effect = element_factory
+        probe = PageProbe(device, cache_ttl_s=0)
+
+        result = probe.probe_current_page(fast=False)
+
+        assert result["state"] == "detail_page"
+        assert result["price_container"] is False
+
     def test_sku_page_by_activity_fast_path(self):
         """Full probe uses Activity shortcut for NcovSku, sets price_container."""
         device = _make_device("com.damai.NcovSkuActivity")

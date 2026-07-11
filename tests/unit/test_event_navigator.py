@@ -1,6 +1,6 @@
 """Unit tests for EventNavigator."""
 
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 
 import pytest
@@ -567,3 +567,264 @@ class TestSelectSessionBoundaryCases:
         assert idx == 1
         # Center of [540,0][1080,200] = (810, 100)
         driver.click.assert_called_once_with(810, 100)
+
+
+# ---------------------------------------------------------------------------
+# issue #51+#50：标题模糊匹配 / 城市冲突 veto / 打分增强
+# ---------------------------------------------------------------------------
+
+
+class _NavBotShim:
+    """把 bot 委托回环转发到 EventNavigator 本体的最小替身。
+
+    与生产链路一致：navigator 内部通过 ``bot._keyword_tokens()`` /
+    ``bot._title_matches_target()`` 回环调用（delegators 门面行为）。
+    """
+
+    def __init__(self, nav, detail_title=None):
+        self._nav = nav
+        self.item_detail = None
+        self._detail_title = detail_title
+
+    def _keyword_tokens(self):
+        return self._nav._keyword_tokens()
+
+    def _title_matches_target(self, title_text):
+        return self._nav._title_matches_target(title_text)
+
+    def _get_detail_title_text(self):
+        return self._detail_title
+
+
+def _make_fuzzy_nav(
+    keyword=None, city=None, target_title=None, target_venue=None, detail_title=None
+):
+    config = MagicMock()
+    config.keyword = keyword
+    config.city = city
+    config.target_title = target_title
+    config.target_venue = target_venue
+    nav = EventNavigator(device=MagicMock(), config=config, probe=MagicMock())
+    nav.set_bot(_NavBotShim(nav, detail_title=detail_title))
+    return nav
+
+
+class TestTitleMatchesTargetFuzzy:
+    """issue #51 回归：词序/前缀/截断变体经模糊回退通过；无关演出仍拒绝。"""
+
+    def _nav(self, city=None):
+        return _make_fuzzy_nav(keyword="嘉年华2026周杰伦 演唱会", city=city)
+
+    def test_title_matches_target_fuzzy_word_order(self):
+        # 修复前 False：词序颠倒（相似度 0.870 >= 0.75）
+        assert (
+            self._nav()._title_matches_target("周杰伦嘉年华2026演唱会（北京站）")
+            is True
+        )
+
+    def test_title_matches_target_official_word_order(self):
+        # 修复前 False：官方全称词序变体（相似度 0.823）
+        assert (
+            self._nav()._title_matches_target(
+                "2026周杰伦嘉年华世界巡回演唱会-北京站"
+            )
+            is True
+        )
+
+    def test_title_matches_target_truncated_ellipsis(self):
+        # 修复前 False：UI 省略号截断（相似度 0.854）
+        assert (
+            self._nav()._title_matches_target("龙拳·北京 嘉年华2026周杰伦演唱…")
+            is True
+        )
+
+    def test_title_matches_target_unrelated_false(self):
+        # 防放松过度：无关演出（相似度 0.272）仍为 False
+        assert (
+            self._nav()._title_matches_target("张学友60+巡回演唱会北京站") is False
+        )
+
+    def test_title_matches_target_city_conflict_veto(self):
+        # issue #50 反向风险收紧：目标广州、标题北京站——修复前全 token
+        # 命中放行（True），修复后城市冲突 veto 直接拒绝
+        nav = _make_fuzzy_nav(keyword="凤凰传奇 演唱会", city="广州")
+        assert (
+            nav._title_matches_target("凤凰传奇2026吉祥如意巡回演唱会——北京站")
+            is False
+        )
+
+    def test_title_matches_target_target_city_in_title_not_vetoed(self):
+        nav = _make_fuzzy_nav(keyword="凤凰传奇 演唱会", city="广州")
+        assert (
+            nav._title_matches_target("凤凰传奇2026吉祥如意巡回演唱会——广州站")
+            is True
+        )
+
+    def test_title_matches_target_non_string_city_skips_veto(self):
+        # MagicMock config.city（非 str）不触发 veto——既有 MagicMock 用例不受影响
+        nav = _make_fuzzy_nav(keyword="张杰 演唱会", city=MagicMock())
+        assert nav._title_matches_target("张杰2026巡回演唱会北京站") is True
+
+
+class TestCurrentPageMatchesClickedTitle:
+    """issue #51 回归：详情页短标题/截断用「刚点击的卡片标题」锚定校验。"""
+
+    def test_current_page_matches_clicked_title_short_detail(self):
+        nav = _make_fuzzy_nav(
+            keyword="嘉年华2026周杰伦 演唱会",
+            detail_title="龙拳·北京 嘉年华",
+        )
+        assert (
+            nav._current_page_matches_target(
+                {"state": "detail_page"},
+                clicked_title="龙拳·北京 嘉年华2026周杰伦演唱会",
+            )
+            is True
+        )
+
+    def test_current_page_matches_clicked_title_fuzzy(self):
+        # 详情页与卡片文案词序不同：靠 title_similarity >= 0.75 锚定通过
+        nav = _make_fuzzy_nav(
+            keyword="周杰伦 演唱会",
+            detail_title="周杰伦嘉年华2026演唱会（北京站）",
+        )
+        assert (
+            nav._current_page_matches_target(
+                {"state": "detail_page"},
+                clicked_title="嘉年华2026周杰伦演唱会",
+            )
+            is True
+        )
+
+    def test_current_page_empty_detail_title_retries_then_falls_back(self):
+        # 对抗审查补充 3a：详情页标题读空时短重试一次；仍空则显式记录并回落
+        nav = _make_fuzzy_nav(keyword="张杰 演唱会", detail_title="")
+        bot = nav._bot
+        calls = {"n": 0}
+
+        def fake_title():
+            calls["n"] += 1
+            return ""
+
+        bot._get_detail_title_text = fake_title
+        with patch("mobile.event_navigator.time.sleep") as mock_sleep:
+            result = nav._current_page_matches_target(
+                {"state": "detail_page"}, clicked_title="张杰2026巡回演唱会"
+            )
+        assert result is False
+        assert calls["n"] == 2  # 首读 + 短重试
+        mock_sleep.assert_called_once()
+
+    def test_current_page_no_clicked_title_keeps_old_path(self):
+        # 向后兼容：不传 clicked_title 时走既有 keyword 校验路径
+        nav = _make_fuzzy_nav(keyword="张杰 演唱会", detail_title="张杰2026巡回演唱会北京站")
+        assert nav._current_page_matches_target({"state": "detail_page"}) is True
+
+    def test_current_page_mismatch_returns_false(self):
+        # 详情页标题与被点卡片、keyword 均不相干：锚定与回退双双失败 → False
+        nav = _make_fuzzy_nav(keyword="张杰 演唱会", detail_title="开心麻花爆笑舞台剧")
+        assert (
+            nav._current_page_matches_target(
+                {"state": "detail_page"}, clicked_title="张杰2026巡回演唱会北京站"
+            )
+            is False
+        )
+
+
+class TestScoreSearchResultEnhancements:
+    """issue #50 回归：相似度加分 / 城市字段分 / 年份冲突罚分。"""
+
+    def _nav(self):
+        return _make_fuzzy_nav(
+            keyword="凤凰传奇 演唱会", city="广州", target_venue=None
+        )
+
+    def test_score_search_result_similarity_bonus(self):
+        # 修复前 40 分被拒（<60）；相似度 0.482 补分后过点击阈值
+        score = self._nav()._score_search_result(
+            "凤凰传奇「吉祥如意」2026巡演·广州站", "广州体育馆"
+        )
+        assert score >= 60
+
+    def test_score_search_result_unrelated_stays_below(self):
+        # 同城无关演出不得过阈值（相似度 0.314 无加分）
+        score = self._nav()._score_search_result(
+            "五月天2026巡回演唱会广州站", "广州体育馆"
+        )
+        assert score < 60
+
+    def test_score_search_result_unrelated_with_city_field_stays_below(self):
+        # 对抗审查修正 2 边界：城市字段分（+10）不得把同城无关演出推过阈值
+        score = self._nav()._score_search_result(
+            "五月天2026巡回演唱会广州站", "广州体育馆", "广州"
+        )
+        assert score < 60
+
+    def test_score_search_result_city_field(self):
+        # 城市字段加/罚分（+10 vs -80）：同一标题下差距至少 90
+        nav = self._nav()
+        title = "凤凰传奇「吉祥如意」2026巡演·广州站"
+        score_match = nav._score_search_result(title, "体育馆", "广州")
+        score_conflict = nav._score_search_result(title, "体育馆", "北京")
+        assert score_match - score_conflict >= 90
+
+    def test_score_search_result_city_field_none_backward_compatible(self):
+        # 不传 city_text 与传 None 等价（旧调用方/delegators 兼容）
+        nav = self._nav()
+        title = "凤凰传奇「吉祥如意」2026巡演·广州站"
+        assert nav._score_search_result(title, "体育馆") == nav._score_search_result(
+            title, "体育馆", None
+        )
+
+    def test_score_search_result_year_conflict(self):
+        # keyword 与标题都含 4 位年份且不同：至少低 60 分（防跨年巡演误配）
+        nav = _make_fuzzy_nav(keyword="张杰2026演唱会", city=None)
+        score_same_year = nav._score_search_result("张杰2026巡回演唱会", "")
+        score_conflict = nav._score_search_result("张杰2025巡回演唱会", "")
+        assert score_same_year - score_conflict >= 60
+
+
+class TestOpenTargetRejectedBlacklist:
+    """issue #51：详情页校验失败的卡片进入黑名单，不再反复点击。"""
+
+    def test_open_target_blacklists_mismatched_card(self):
+        nav = _make_fuzzy_nav(keyword="张杰 演唱会", city=None)
+        bot = nav._bot
+
+        card_high, card_low = MagicMock(name="card_high"), MagicMock(name="card_low")
+        texts = {
+            (id(card_high), "cn.damai:id/tv_project_name"): "张杰2026巡回演唱会北京站",
+            (id(card_low), "cn.damai:id/tv_project_name"): "张杰2026",
+        }
+
+        bot._find_all = MagicMock(return_value=[card_high, card_low])
+        bot._safe_element_text = lambda container, by, value: texts.get(
+            (id(container), value), ""
+        )
+        bot._score_search_result = (
+            lambda title, venue, city_text=None: nav._score_search_result(
+                title, venue, city_text
+            )
+        )
+        bot._click_element_center = MagicMock()
+        bot.wait_for_page_state = MagicMock(return_value={"state": "detail_page"})
+        bot._current_page_matches_target = MagicMock(return_value=False)
+        bot._press_keycode_safe = MagicMock(return_value=True)
+        bot.dismiss_startup_popups = MagicMock()
+        bot._scroll_search_results = MagicMock()
+        bot._timed_step = MagicMock()
+        bot._timed_step.return_value.__enter__ = MagicMock()
+        bot._timed_step.return_value.__exit__ = MagicMock(return_value=False)
+
+        with patch("mobile.event_navigator.time.sleep"):
+            result = nav._open_target_from_search_results(
+                max_scrolls=1, return_details=True
+            )
+
+        assert result["opened"] is False
+        # 高分卡首轮被点击并校验失败后进黑名单：第二轮不再点击（总共 1 次）
+        bot._click_element_center.assert_called_once_with(card_high)
+        # 点击后的详情页校验必须携带被点卡片标题（clicked_title 锚定）
+        bot._current_page_matches_target.assert_called_once_with(
+            {"state": "detail_page"}, clicked_title="张杰2026巡回演唱会北京站"
+        )

@@ -24,6 +24,7 @@ try:
     )
     from mobile.damai_app import DamaiBot
     from mobile.logger import get_logger
+    from mobile.proc_utils import run_captured
     from mobile.prompt_parser import (
         choose_price_option,
         is_price_option_available,
@@ -38,6 +39,7 @@ except ImportError:
     )
     from damai_app import DamaiBot
     from logger import get_logger
+    from proc_utils import run_captured
     from prompt_parser import (
         choose_price_option,
         is_price_option_available,
@@ -164,12 +166,9 @@ def _load_base_config_dict(config_path: Path) -> dict:
 def _list_connected_device_ids() -> list[str] | None:
     """Return adb-connected Android device ids, or None if adb is unavailable."""
     try:
-        result = subprocess.run(
-            ["adb", "devices"],
-            capture_output=True,
-            text=True,
-            check=True,
-        )
+        # 经 run_captured 显式 UTF-8 解码，避免 Windows GBK locale 下的
+        # 解码问题（issue #50）；check=True 语义由封装原样透传。
+        result = run_captured(["adb", "devices"], check=True)
     except (FileNotFoundError, subprocess.CalledProcessError):
         return None
 
@@ -708,6 +707,39 @@ def parse_args(argv=None):
     return parser.parse_args(argv)
 
 
+def _build_discovery_failure_message(bot, intent) -> str:
+    """discover 失败时组装错误文案（issue #51+#50）。
+
+    有候选时列出 top-5 并引导用户把完整演出标题原文写进提示词；候选缺失或
+    非法（MagicMock/旧版 bot 等）时回落到原有错误文案。安全底线：低置信
+    候选一律报错引导，绝不自动点击（误买不可接受）。
+    """
+    candidates = getattr(bot, "_last_failed_candidates", None)
+    if not isinstance(candidates, list):
+        candidates = []
+    candidates = [item for item in candidates if isinstance(item, dict)]
+    if not candidates:
+        return "未能根据提示词打开目标演出"
+
+    tried_keywords = "、".join(intent.candidate_keywords or [])
+    lines = [
+        f"未能自动确认目标演出（已尝试关键词：{tried_keywords}）",
+        "以下是本次搜索到的候选（按匹配分数降序，最多 5 条）：",
+    ]
+    for index, item in enumerate(candidates[:5], start=1):
+        lines.append(
+            f"  {index}. score={item.get('score')} | {item.get('title')}"
+            f" | {item.get('city') or '-'} | {item.get('venue') or '-'}"
+            f" | {item.get('time') or '-'}"
+        )
+    lines.append(
+        "为避免误买，低置信候选不会被自动点击。"
+        "如目标在列表中，请把完整演出标题原文写进提示词后重试，"
+        "例如：帮<观演人>抢<日期> <完整标题>"
+    )
+    return "\n".join(lines)
+
+
 def main(argv=None):
     args = parse_args(argv)
     config_path = _config_path(args.config)
@@ -764,7 +796,7 @@ def main(argv=None):
             intent.candidate_keywords, initial_probe=page_probe
         )
         if not discovery:
-            raise RuntimeError("未能根据提示词打开目标演出")
+            raise RuntimeError(_build_discovery_failure_message(bot, intent))
 
         discovery["summary"] = bot.inspect_current_target_event(
             discovery.get("page_probe")

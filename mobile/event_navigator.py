@@ -21,9 +21,19 @@ from selenium.common.exceptions import TimeoutException
 from mobile.logger import get_logger, log_event
 
 try:
-    from mobile.item_resolver import normalize_text, city_keyword
+    from mobile.item_resolver import (
+        city_keyword,
+        find_conflicting_city,
+        normalize_text,
+        title_similarity,
+    )
 except ImportError:
-    from item_resolver import normalize_text, city_keyword
+    from item_resolver import (  # type: ignore[no-redef]
+        city_keyword,
+        find_conflicting_city,
+        normalize_text,
+        title_similarity,
+    )
 
 try:
     from mobile.date_utils import normalize_date
@@ -34,6 +44,18 @@ if TYPE_CHECKING:
     from mobile.page_probe import PageProbe
 
 logger = get_logger(__name__)
+
+
+# issue #51+#50 搜索/标题匹配阈值（离线校准，调参原则：负向信号——城市/年份
+# 冲突——永远优先于放松匹配）：
+# - _TITLE_FUZZY_THRESHOLD：标题模糊回退的相似度下限（词序颠倒 0.870 /
+#   官方词序 0.823 / 省略号截断 0.854 需通过；无关演出 <=0.31 需拒绝）
+# - _CLICK_SCORE_THRESHOLD：搜索卡点击分数阈值（原硬编码 60 提取为常量）
+# - _SIMILARITY_BONUS_MIN：打分相似度加分的下限（#50 巡演写法 0.482 需加分，
+#   无关演出 0.314 不加分）
+_TITLE_FUZZY_THRESHOLD = 0.75
+_CLICK_SCORE_THRESHOLD = 60
+_SIMILARITY_BONUS_MIN = 0.45
 
 
 # Re-export the page-recovery helpers so callers and tests can keep importing
@@ -258,6 +280,10 @@ class EventNavigator:
         self._config = config
         self._probe = probe
         self._bot = bot  # DamaiBot reference for delegation
+        # discover_target_event 最终失败时的候选缓存（issue #51+#50：
+        # prompt_runner 通过 DamaiBot._last_failed_candidates 只读 property
+        # 读取，用于失败文案中列出 top-5 候选引导用户补全标题）
+        self._last_failed_candidates: list = []
 
     def set_bot(self, bot) -> None:
         """Set the DamaiBot reference (breaks circular init dependency)."""
@@ -305,6 +331,25 @@ class EventNavigator:
         if not normalized_title:
             return False
 
+        # 城市冲突 veto（issue #50 反向风险收紧）：目标城市明确、标题却写着
+        # 另一个已知城市时直接拒绝——置于所有通过路径之前，防止错城市场次
+        # 被全 token 命中放行。isinstance 守卫兼容 MagicMock config。
+        target_city = (
+            self._config.city if isinstance(self._config.city, str) else None
+        )
+        if target_city:
+            conflict_city = find_conflicting_city(normalized_title, target_city)
+            if conflict_city:
+                log_event(
+                    logger,
+                    "title_city_conflict",
+                    level=logging.WARNING,
+                    title=title_text,
+                    conflict_city=conflict_city,
+                    target_city=target_city,
+                )
+                return False
+
         candidates = []
         if bot.item_detail:
             candidates.extend(
@@ -331,10 +376,36 @@ class EventNavigator:
         ):
             return True
 
+        # 模糊回退（issue #51）：词序颠倒/短标题前缀/UI 省略号截断等文案变体
+        # 在精确路径全部失败后按相似度兜底。
+        best_similarity = 0.0
+        best_candidate = None
+        for candidate in candidates:
+            similarity = title_similarity(candidate, title_text)
+            if similarity > best_similarity:
+                best_similarity = similarity
+                best_candidate = candidate
+        if best_similarity >= _TITLE_FUZZY_THRESHOLD:
+            log_event(
+                logger,
+                "title_fuzzy_match",
+                title=title_text,
+                candidate=best_candidate,
+                similarity=round(best_similarity, 3),
+            )
+            return True
+
         return False
 
-    def _current_page_matches_target(self, page_probe):
-        """Check if the current detail/sku page already points at the expected event."""
+    def _current_page_matches_target(self, page_probe, clicked_title=None):
+        """Check if the current detail/sku page already points at the expected event.
+
+        Args:
+            page_probe: 页面状态探测结果。
+            clicked_title: 刚点击的搜索卡片标题原文（issue #51：详情页标题与
+                搜索卡片是两套文案，用「刚点击的卡片」锚定校验可容忍词序/
+                短标题/截断差异）。``None`` 时保持旧行为。
+        """
         bot = self._bot
         if page_probe["state"] not in {"detail_page", "sku_page"}:
             return False
@@ -346,7 +417,55 @@ class EventNavigator:
         ):
             return True
 
-        return bot._title_matches_target(bot._get_detail_title_text())
+        detail_title = bot._get_detail_title_text()
+
+        if clicked_title:
+            if not detail_title:
+                # 详情页标题偶发未渲染读空：短重试一次再回落（对抗审查补充 3a）
+                time.sleep(0.3)
+                detail_title = bot._get_detail_title_text()
+            if not detail_title:
+                # clicked_title 高分但详情标题为空：显式记录，不静默 False
+                log_event(
+                    logger,
+                    "detail_title_empty",
+                    level=logging.WARNING,
+                    clicked_title=clicked_title,
+                )
+            else:
+                normalized_clicked = normalize_text(clicked_title)
+                normalized_detail = normalize_text(detail_title)
+                similarity = title_similarity(clicked_title, detail_title)
+                if (
+                    normalized_clicked
+                    and normalized_detail
+                    and (
+                        normalized_clicked in normalized_detail
+                        or normalized_detail in normalized_clicked
+                    )
+                ) or similarity >= _TITLE_FUZZY_THRESHOLD:
+                    log_event(
+                        logger,
+                        "detail_title_verified",
+                        match="clicked_card",
+                        similarity=round(similarity, 3),
+                    )
+                    return True
+
+        if bot._title_matches_target(detail_title):
+            return True
+
+        if clicked_title:
+            log_event(
+                logger,
+                "detail_title_mismatch",
+                level=logging.WARNING,
+                detail_title=detail_title,
+                clicked_title=clicked_title,
+                keyword=self._config.keyword,
+                similarity=round(title_similarity(clicked_title, detail_title), 3),
+            )
+        return False
 
     def _open_search_from_homepage(self):
         """Enter the homepage search flow."""
@@ -447,8 +566,15 @@ class EventNavigator:
 
         return True
 
-    def _score_search_result(self, title_text, venue_text):
-        """Score a search result against the configured target."""
+    def _score_search_result(self, title_text, venue_text, city_text=None):
+        """Score a search result against the configured target.
+
+        Args:
+            title_text: 搜索卡片标题（tv_project_name）。
+            venue_text: 搜索卡片场馆（tv_project_venueName）。
+            city_text: 搜索卡片城市字段（tv_project_city，issue #50：此前被
+                采集却不参与打分）。``None`` 时跳过城市字段加/罚分。
+        """
         bot = self._bot
         normalized_title = normalize_text(title_text)
         normalized_venue = normalize_text(venue_text)
@@ -491,6 +617,45 @@ class EventNavigator:
             if expected_venue and expected_venue in normalized_venue:
                 score += 30
 
+        # 相似度分（issue #50：「巡演」等写法不含连写「演唱会」时，token 分
+        # 不够过点击阈值；按 keyword 相似度补分，无关演出 <0.45 不加分）
+        keyword_for_similarity = (
+            self._config.keyword if isinstance(self._config.keyword, str) else None
+        )
+        if keyword_for_similarity:
+            similarity = title_similarity(keyword_for_similarity, title_text)
+            if similarity >= _SIMILARITY_BONUS_MIN:
+                score += int(50 * similarity)
+
+        # 城市字段分（issue #50：tv_project_city 参与打分）。加分为 +10 而非
+        # +20——对抗审查修正 2：+20 会把「同城无关演出」精确推到点击阈值 60。
+        target_city = (
+            self._config.city if isinstance(self._config.city, str) else None
+        )
+        if target_city and isinstance(city_text, str) and city_text:
+            normalized_city_text = normalize_text(city_text)
+            normalized_target_city = normalize_text(city_keyword(target_city))
+            if normalized_target_city and normalized_target_city in normalized_city_text:
+                score += 10
+            elif find_conflicting_city(city_text, target_city):
+                score -= 80
+                log_event(
+                    logger,
+                    "search_result_city_conflict",
+                    title=title_text,
+                    city_text=city_text,
+                    target_city=target_city,
+                )
+
+        # 年份冲突罚分：keyword 与标题都写明 4 位年份且无交集时罚 60 分，
+        # 防同名跨年巡演误配（限定 19xx/20xx，避免误伤票价类 4 位数字）
+        if keyword_for_similarity and isinstance(title_text, str):
+            year_pattern = r"(?<!\d)((?:19|20)\d{2})(?!\d)"
+            keyword_years = set(re.findall(year_pattern, keyword_for_similarity))
+            title_years = set(re.findall(year_pattern, title_text))
+            if keyword_years and title_years and not (keyword_years & title_years):
+                score -= 60
+
         return score
 
     def _scroll_search_results(self):
@@ -519,6 +684,9 @@ class EventNavigator:
         bot = self._bot
         seen_titles = set()
         collected = []
+        # 详情页校验失败的卡片黑名单：后续扫描仍计入 collected，但不再参与
+        # best_match 竞选，避免反复点击同一张失败卡（issue #51 死循环根因）
+        rejected_titles = set()
 
         with bot._timed_step(
             "搜索结果扫描并打开目标",
@@ -530,6 +698,7 @@ class EventNavigator:
                 result_cards = bot._find_all(By.ID, "cn.damai:id/ll_search_item")
                 best_match = None
                 best_score = -1
+                best_title = None
 
                 for card in result_cards:
                     title_text = bot._safe_element_text(
@@ -551,7 +720,7 @@ class EventNavigator:
                     time_text = bot._safe_element_text(
                         card, By.ID, "cn.damai:id/tv_project_time"
                     )
-                    score = bot._score_search_result(title_text, venue_text)
+                    score = bot._score_search_result(title_text, venue_text, city_text)
 
                     normalized_title = normalize_text(title_text)
                     if normalized_title and normalized_title not in seen_titles:
@@ -566,11 +735,16 @@ class EventNavigator:
                         )
                         seen_titles.add(normalized_title)
 
+                    if normalized_title in rejected_titles:
+                        log_event(logger, "search_result_rejected", title=title_text)
+                        continue
+
                     if score > best_score:
                         best_score = score
                         best_match = card
+                        best_title = title_text
 
-                if best_match is not None and best_score >= 60:
+                if best_match is not None and best_score >= _CLICK_SCORE_THRESHOLD:
                     bot._click_element_center(best_match)
                     detail_probe = bot.wait_for_page_state(
                         {"detail_page", "sku_page"}, timeout=5.5
@@ -578,7 +752,9 @@ class EventNavigator:
                     if detail_probe["state"] in {
                         "detail_page",
                         "sku_page",
-                    } and bot._current_page_matches_target(detail_probe):
+                    } and bot._current_page_matches_target(
+                        detail_probe, clicked_title=best_title
+                    ):
                         collected.sort(key=lambda item: item["score"], reverse=True)
                         details = {
                             "opened": True,
@@ -589,6 +765,7 @@ class EventNavigator:
                     logger.warning(
                         "已进入详情页，但标题与目标演出不一致，返回搜索结果继续尝试"
                     )
+                    rejected_titles.add(normalize_text(best_title))
                     if not bot._press_keycode_safe(4, context="返回搜索列表"):
                         break
                     time.sleep(0.25)
@@ -710,6 +887,7 @@ class EventNavigator:
         """Try multiple keywords, collect candidate summaries, and open the best match."""
         bot = self._bot
         bot._last_discovery_step_timings = []
+        self._last_failed_candidates = []
         page_probe = initial_probe or bot.probe_current_page()
         page_probe = bot._recover_to_navigation_start(page_probe)
 
@@ -751,6 +929,7 @@ class EventNavigator:
             return None
 
         tried = set()
+        failed_candidates: List[Dict[str, Any]] = []
         for keyword in keyword_candidates:
             normalized_keyword = normalize_text(keyword)
             if not normalized_keyword or normalized_keyword in tried:
@@ -807,8 +986,36 @@ class EventNavigator:
                     "step_timings": list(bot._last_discovery_step_timings),
                 }
 
+            for item in search_results:
+                entry = dict(item)
+                entry["used_keyword"] = keyword
+                failed_candidates.append(entry)
+
             tried.add(normalized_keyword)
 
+        # 最终失败：合并各关键词轮次候选（按标题归一化去重，重复取高分），
+        # 按 score 降序缓存 top-5，供 prompt_runner 失败文案引导用户补全标题。
+        # 契约保持不变：失败仍 return None（调用方依赖 falsy 判定）。
+        merged: Dict[str, Dict[str, Any]] = {}
+        for entry in failed_candidates:
+            key = normalize_text(str(entry.get("title") or ""))
+            if not key:
+                continue
+            existing = merged.get(key)
+            if existing is None or entry.get("score", 0) > existing.get("score", 0):
+                merged[key] = entry
+        top_candidates = sorted(
+            merged.values(), key=lambda item: item.get("score", 0), reverse=True
+        )[:5]
+        self._last_failed_candidates = top_candidates
+        log_event(
+            logger,
+            "discovery_failed",
+            level=logging.WARNING,
+            keywords_tried=len(tried),
+            candidates=len(top_candidates),
+            top_score=top_candidates[0].get("score") if top_candidates else None,
+        )
         logger.warning("根据提示词尝试多个搜索关键词后，仍未打开目标演出")
         return None
 
