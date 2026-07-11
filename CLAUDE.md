@@ -82,7 +82,9 @@ cargo test --manifest-path desktop/src-tauri/Cargo.toml
 
 ### CI/CD
 
-- `.github/workflows/release.yml` — Tag-triggered (`v*`) cross-platform Tauri build (macOS/Linux/Windows) with GitHub Release upload
+- `.github/workflows/test.yml` — push/PR CI: pytest on Python 3.8/3.9/3.10/3.12/3.13 matrix with 80% coverage gate
+- `.github/workflows/release.yml` — Tag-triggered (`v*`): creates a GitHub Release from the tag annotation (`softprops/action-gh-release` + auto-generated notes). No Tauri build and **no binary asset** — Mobile is source-only, users upgrade via `git pull` + `poetry install`. The old cross-platform Tauri build was removed with the Desktop deprecation.
+- `.github/workflows/_e2e_dryrun.yml` — self-hosted-runner real-device E2E scaffold (dry-run, disabled by default)
 
 ## Key Design Decisions
 
