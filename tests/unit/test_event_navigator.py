@@ -581,10 +581,11 @@ class _NavBotShim:
     ``bot._title_matches_target()`` 回环调用（delegators 门面行为）。
     """
 
-    def __init__(self, nav, detail_title=None):
+    def __init__(self, nav, detail_title=None, detail_venue=""):
         self._nav = nav
         self.item_detail = None
         self._detail_title = detail_title
+        self._detail_venue = detail_venue
 
     def _keyword_tokens(self):
         return self._nav._keyword_tokens()
@@ -594,6 +595,9 @@ class _NavBotShim:
 
     def _get_detail_title_text(self):
         return self._detail_title
+
+    def _get_detail_venue_text(self):
+        return self._detail_venue
 
 
 def _make_fuzzy_nav(
@@ -696,24 +700,58 @@ class TestCurrentPageMatchesClickedTitle:
             is True
         )
 
-    def test_current_page_empty_detail_title_retries_then_falls_back(self):
-        # 对抗审查补充 3a：详情页标题读空时短重试一次；仍空则显式记录并回落
-        nav = _make_fuzzy_nav(keyword="张杰 演唱会", detail_title="")
+    def test_current_page_empty_title_extended_poll_then_reads(self):
+        # 2026-07-11 真机回归：标题异步慢渲染，延长轮询后读到 → 正常锚定通过
+        nav = _make_fuzzy_nav(keyword="大鱼海棠 十周年", detail_title="")
         bot = nav._bot
+        calls = {"n": 0}
+
+        def fake_title():
+            calls["n"] += 1
+            return (
+                "" if calls["n"] < 4 else "上海·2026《大鱼海棠·十周年重逢之夜》特别呈现"
+            )
+
+        bot._get_detail_title_text = fake_title
+        with patch("mobile.event_navigator.time.sleep"):
+            result = nav._current_page_matches_target(
+                {"state": "detail_page"},
+                clicked_title="上海•2026《大鱼海棠·十周年重逢之夜》特别呈现",
+            )
+        assert result is True
+        assert calls["n"] == 4  # 首读空 + 轮询第 3 次读到
+
+    def test_current_page_empty_title_venue_fallback(self):
+        # 标题始终读空，但场馆可读且与 target_venue 一致 → venue 兜底通过
+        nav = _make_fuzzy_nav(
+            keyword="大鱼海棠 十周年", target_venue="虹口足球场", detail_title=""
+        )
+        nav._bot._detail_venue = "虹口足球场"
+        with patch("mobile.event_navigator.time.sleep") as mock_sleep:
+            result = nav._current_page_matches_target(
+                {"state": "detail_page"},
+                clicked_title="上海•2026《大鱼海棠·十周年重逢之夜》特别呈现",
+            )
+        assert result is True
+        assert mock_sleep.call_count == 6  # 延长轮询全程走完
+
+    def test_current_page_empty_title_unverified_accept(self):
+        # 标题与场馆均不可读：「读不到」≠「不一致」，信任高分锚定卡片放行,
+        # 避免正确条目被加入 rejected_titles 黑名单造成死循环（真机实测）
+        nav = _make_fuzzy_nav(keyword="张杰 演唱会", detail_title="")
         calls = {"n": 0}
 
         def fake_title():
             calls["n"] += 1
             return ""
 
-        bot._get_detail_title_text = fake_title
-        with patch("mobile.event_navigator.time.sleep") as mock_sleep:
+        nav._bot._get_detail_title_text = fake_title
+        with patch("mobile.event_navigator.time.sleep"):
             result = nav._current_page_matches_target(
                 {"state": "detail_page"}, clicked_title="张杰2026巡回演唱会"
             )
-        assert result is False
-        assert calls["n"] == 2  # 首读 + 短重试
-        mock_sleep.assert_called_once()
+        assert result is True
+        assert calls["n"] == 7  # 首读 + 6 次延长轮询全部读空
 
     def test_current_page_no_clicked_title_keeps_old_path(self):
         # 向后兼容：不传 clicked_title 时走既有 keyword 校验路径

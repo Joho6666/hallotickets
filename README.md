@@ -32,19 +32,34 @@
 | ~~`Desktop`~~ | ~~`desktop/`~~ | ~~不可用~~ | ~~官方渠道和风控已限制，当前不要再作为可执行方案使用~~ |
 
 > 如果你是第一次用，直接走 `Mobile + 安卓真机`。
-> 如果你是手动配置用户，想先验证流程，直接用 `./mobile/scripts/start_ticket_grabbing.sh --probe --yes`。
+> 如果你是手动配置用户，想先验证流程，直接用 `./mobile/scripts/start_ticket_grabbing.sh --probe`。
 > 如果你看到旧文档里提到 `Desktop`，把它理解成“历史实现”，不要再按它准备环境。
 
 **当前主流程按 `Mobile + 安卓真机` 设计。**
 
-先定位目标演出，再进入票档页和确认页；如果配置了 `item_url + auto_navigate`，脚本可以从大麦首页自动搜到目标演出。
+先定位目标演出，再进入票档页和确认页；如果 `auto_navigate=true`，脚本会用 `keyword` 从大麦首页自动搜索进入目标演出。
 
 现在命令语义固定为：
 
-- `./mobile/scripts/start_ticket_grabbing.sh --probe --yes`：安全探测
-- `./mobile/scripts/start_ticket_grabbing.sh --yes`：正式抢票
+- `./mobile/scripts/start_ticket_grabbing.sh --probe`：安全探测
+- `./mobile/scripts/start_ticket_grabbing.sh --commit --yes`：正式抢票
 
-如果当前配置里的 `probe_only / if_commit_order` 和你执行的命令不一致，脚本会先用醒目的日志提醒你，再自动改写配置并继续执行。
+### 三个旗标的语义
+
+| 旗标 | 含义 |
+| --- | --- |
+| `--probe` | 安全探测：停在“立即购票/立即预订”之前，绝不点击、绝不下单 |
+| `--commit` | 正式抢票：**唯一**会把配置改写为真实下单（`if_commit_order=true`）并提交订单的旗标 |
+| `--yes` / `-y` | 仅跳过普通 y/N 交互确认；**不再能单独触发真实下单**——漏敲 `--probe` 不会误付款，脚本会直接报错退出 |
+
+补充规则：
+
+- `--probe` 与 `--commit` 互斥，同时给出会报错退出
+- `--commit` 不带 `--yes` 时，需要手动输入确认词（`GO` 或配置里的 `keyword` 原文）
+- `--commit` 路径无论是否带 `--yes`，启动前都会打印下单摘要（演出/票档/观演人/场次）并倒数 3 秒，`Ctrl-C` 可随时取消
+- 两个旗标都不带时：交互终端会进入强确认闸门，非交互环境直接报错退出
+
+如果当前配置里的 `probe_only / if_commit_order` 和你执行的命令不一致，脚本会先用醒目的日志提醒你，再改写配置并继续执行。
 
 ## 推荐阅读顺序
 
@@ -62,10 +77,10 @@
 
 这 2 个用户阶段一定要区分清楚：
 
-1. `./mobile/scripts/start_ticket_grabbing.sh --probe --yes`
-   只是探测。会自动打开目标演出页，但会停在“立即购票/立即预订”之前，不会真正点击。
-2. `./mobile/scripts/start_ticket_grabbing.sh --yes`
-   才是正式提交模式，会尝试提交订单。
+1. `./mobile/scripts/start_ticket_grabbing.sh --probe`
+   只是探测。会自动打开目标演出页，但会停在“立即购票/立即预订”之前，不会真正点击。（自动化场景可加 `--yes` 跳过确认）
+2. `./mobile/scripts/start_ticket_grabbing.sh --commit --yes`
+   才是正式提交模式，会打印下单摘要、倒数 3 秒后尝试提交订单。
 
 ### 1. 安装依赖
 
@@ -89,7 +104,7 @@ poetry install
 adb devices
 ```
 
-输出里类似 `ABC1234567	device` 的这一串，就是你的 `udid`。
+输出里类似 `ABC1234567	device` 的这一串，就是你的 `serial`（配置文件中的设备序列号字段）。
 
 ### 3. 准备本地配置
 
@@ -110,8 +125,8 @@ adb devices
 - 只有当你手动写了张数、且和观演人数不一致时，脚本才会停止
 - 这种情况下不会继续搜索、连接设备，也不会写配置
 - 脚本会直接打印“可复制的正确命令”和“规范提示词”，你按输出替换后重试即可
-- 如果当前只连接了一台安卓设备，脚本会自动识别并临时修正 `udid / platform_version`
-- 在 `apply / probe` 模式下，这两个设备字段也会一起写回 `mobile/config.jsonc`
+- 如果当前只连接了一台安卓设备，脚本会自动识别并临时修正 `serial`
+- 在 `apply / probe` 模式下，设备序列号也会一起写回 `mobile/config.jsonc`
 - 推荐提示词格式：`给张三和李四抢4 月 6 号张杰的北京站演唱会内场门票，票价 1680 元`
 - 使用时请把 `张三`、`李四` 替换成你自己已经在大麦 App 中添加成功的真实观演人姓名
 
@@ -121,10 +136,10 @@ adb devices
 - `apply`：写入 `mobile/config.jsonc`，适合你想自己再检查一遍配置
 - `probe`：写入 `mobile/config.jsonc`，并直接执行一次安全探测
 
-和下面第 4、5 步的对应关系是：
+和后面章节的对应关系是：
 
-- `probe` 对应第 3 步：安全探测
-- 第 4 步才是正式抢票；为了避免误下单，`run_from_prompt` 不直接提供自动提交模式
+- `probe` 对应 [3.2 手动配置](#32-手动配置) 末尾的安全探测
+- 正式抢票见 [4. 正式提交前再确认一次](#4-正式提交前再确认一次)；为了避免误下单，`run_from_prompt` 不直接提供自动提交模式
 
 如果你只是想先看看 AI 识别得对不对，运行：
 
@@ -143,7 +158,7 @@ adb devices
 ./mobile/scripts/run_from_prompt.sh --mode apply --yes "给张三和李四抢4 月 6 号张杰的北京站演唱会内场门票，票价 1680 元"
 ```
 
-执行完 `apply` 后，直接跳到下面第 4 步继续即可，不需要再回头看 3.2。
+执行完 `apply` 后，直接跳到 [4. 正式提交前再确认一次](#4-正式提交前再确认一次) 继续即可，不需要再回头看 3.2。
 
 如果你想“生成配置 + 直接做安全探测”，运行：
 
@@ -152,13 +167,13 @@ adb devices
 ```
 
 这就是普通用户最推荐的探测方式。
-也就是说，如果你已经在用自然语言入口，通常**不需要**再单独执行一次 `./mobile/scripts/start_ticket_grabbing.sh --probe --yes`。
+也就是说，如果你已经在用自然语言入口，通常**不需要**再单独执行一次 `./mobile/scripts/start_ticket_grabbing.sh --probe`。
 
 #### 3.2 手动配置
 
 如果你没有用 3.1 自动生成配置，或者你已经用 3.1 生成过配置、现在只是想手动检查和微调，再看这一节。
 
-普通用户直接维护 [mobile/config.jsonc](./mobile/config.jsonc) 即可；如果文件被你改乱了，可以先用模板覆盖：
+第一步永远是从模板复制出你的配置文件（`mobile/config.jsonc` 不入库，模板才是唯一口径）：
 
 ```bash
 cp mobile/config.example.jsonc mobile/config.jsonc
@@ -166,39 +181,41 @@ cp mobile/config.example.jsonc mobile/config.jsonc
 
 然后把下面这几个字段改成你自己的真实值：
 
+<!-- CONFIG_EXAMPLE:BEGIN -->
 ```jsonc
 {
-  "udid": "你的 adb devices 序列号",
-  "app_package": "cn.damai",
-  "app_activity": ".launcher.splash.SplashMainActivity",
-  "item_url": "https://m.damai.cn/shows/item.html?itemId=你的 itemId",
-  "keyword": null,
-  "users": ["你已经在大麦 App 中添加成功的观演人姓名"],
-  "city": "你的演出城市",
-  "date": "你的场次日期",
-  "price": "你的票档原文",
+  // adb devices 显示的设备序列号
+  "serial": "你的设备序列号",
+  // 在大麦 App 内搜索目标演出的关键词（必填，不能为 null）
+  "keyword": "张杰 演唱会",
+  // 必须是你已经在大麦 App 中添加成功的观演人；人数 = 购票张数
+  "users": ["你的真实观演人姓名"],
+  "city": "演出城市",
+  "date": "场次日期",
+  "price": "票档原文",
   "price_index": 0,
-  "if_commit_order": false,
   "probe_only": true,
-  "auto_navigate": true,
+  "if_commit_order": false,
+  "auto_navigate": true
 }
 ```
+<!-- CONFIG_EXAMPLE:END -->
 
 字段说明只记最关键的：
 
-- `item_url`：推荐填大麦详情页链接，脚本会自动提取 `itemId`
-- `keyword`：如果 `item_url` 已可用，可以填 `null`
+- `serial`：`adb devices` 输出的设备序列号
+- `keyword`：必填，不能为空或 `null`；脚本用它在大麦 App 内搜索目标演出
 - `users`：必须是你已经在大麦 App 里添加成功的真实观演人；人数就是购票张数
 - `city / date / price`：尽量按 App 页面上的原文填写
 - `price_index`：文本匹配失败时的兜底索引，从 `0` 开始
 - `probe_only=true`：脚本内部使用的探测标记；普通用户优先使用 `--probe`
-- `if_commit_order=false`：脚本会继续到确认页并执行观演人勾选校验，但会停在“立即提交”前；正式抢票时 `start_ticket_grabbing.sh --yes` 会自动改成 `true`
+- `if_commit_order=false`：脚本会继续到确认页并执行观演人勾选校验，但会停在“立即提交”前；正式抢票时 `start_ticket_grabbing.sh --commit` 会自动改成 `true`
 - `auto_navigate=true`：允许脚本从首页/搜索页自动进入目标演出
 
 如果你是手动配置用户，完成这一步后，可以直接用下面这条命令做一次安全探测：
 
 ```bash
-./mobile/scripts/start_ticket_grabbing.sh --probe --yes
+./mobile/scripts/start_ticket_grabbing.sh --probe
 ```
 
 探测通过的标志是：
@@ -213,7 +230,7 @@ cp mobile/config.example.jsonc mobile/config.jsonc
 
 - `mobile/config.local.jsonc` 是可选的本地覆盖配置
 - 它不会提交到 GitHub，适合开发调试时放真机参数
-- 普通用户默认始终使用 [mobile/config.jsonc](./mobile/config.jsonc)
+- 普通用户默认始终使用 `mobile/config.jsonc`
 - 如果你是开发者，需要显式通过 `--config mobile/config.local.jsonc` 或 `HATICKETS_CONFIG_PATH=mobile/config.local.jsonc` 才会启用本地覆盖配置
 
 #### 3.3 如果演唱会 12:00 开抢，建议几点启动脚本
@@ -228,7 +245,7 @@ cp mobile/config.example.jsonc mobile/config.jsonc
 
 也就是说，如果开抢时间是 `12:00`，最稳妥的做法是：
 
-- 至少在 **11:58** 前启动 `./mobile/scripts/start_ticket_grabbing.sh --yes`
+- 至少在 **11:58** 前启动 `./mobile/scripts/start_ticket_grabbing.sh --commit --yes`
 - 更保守一点，直接在 **11:55 到 11:58** 之间启动
 
 推荐配置分两种：
@@ -270,10 +287,12 @@ cp mobile/config.example.jsonc mobile/config.jsonc
 如果你是从 3.1 自动配置开始的，到了这里通常不需要重新生成配置，直接执行：
 
 ```bash
-./mobile/scripts/start_ticket_grabbing.sh --yes
+./mobile/scripts/start_ticket_grabbing.sh --commit --yes
 ```
 
-这条命令会固定按“正式抢票”运行。
+这条命令会固定按“正式抢票”运行；启动前会打印下单摘要（演出/票档/观演人/场次）并倒数 3 秒，`Ctrl-C` 可随时取消。如果你不加 `--yes`，脚本还会要求你手动输入确认词（`GO` 或配置里的 `keyword` 原文）。
+
+> ⚠️ 旧命令 `./mobile/scripts/start_ticket_grabbing.sh --yes`（不带 `--commit`）已不再触发真实下单，会直接报错并给出迁移指引——这是刻意的资金误操作防护。
 
 如果你当前配置里还是：
 
@@ -304,7 +323,7 @@ cp mobile/config.example.jsonc mobile/config.jsonc
 
 ```mermaid
 flowchart TD
-    A["第 3 步：自动配置并探测<br/>run_from_prompt --mode probe"] --> D["第 4 步：正式抢票<br/>probe_only=false<br/>if_commit_order=true"]
+    A["第 3 步：自动配置并探测<br/>run_from_prompt --mode probe"] --> D["第 4 步：正式抢票<br/>start_ticket_grabbing.sh --commit --yes<br/>probe_only=false<br/>if_commit_order=true"]
     A --> B["手动配置用户可选：start_ticket_grabbing.sh --probe<br/>安全探测"]
     B --> D
 
@@ -333,12 +352,109 @@ flowchart TD
 - 需要自动导航或想更稳一点，提前 **3 到 5 分钟**
 - 绝大多数场景下，**11:55 到 11:58 启动**会比掐秒启动更稳
 
+## 退出码与运行摘要
+
+> ⚠️ **行为变更（U-12）**：`python -m damai_app` 及 `start_ticket_grabbing.sh` 失败时不再恒 `exit 0`，而是返回下表的语义化退出码。依赖「总是退出码 0」的旧 cron/脚本需要按本节迁移。
+
+### 运行层退出码（python -m damai_app，脚本原样穿透）
+
+| 退出码 | 含义 | 编排器建议动作 |
+|-------|------|--------------|
+| `0` | 成功（探测就绪 / 验证就绪 / 已提交订单 / 检测到待支付订单） | 结束 |
+| `10` | 所有重试失败（可重试型失败） | 可安全自动重启重试 |
+| `11` | 不可重试失败（`sold_out` / `session_invalid` / `session_not_found` / `reservation_only` / `attendee_unselected` / `submit_unverified`） | **绝不自动重启**——`submit_unverified` 场景重启可能重复下单 |
+| `12` | 配置或设备错误（配置解析/校验失败、设备连接失败、运行期设备异常） | 修复环境后再试；不建议盲目自动重启 |
+| `13` | reserved：实例互斥冲突（U-15 落地后启用，当前任何路径不会返回） | — |
+| `130` | 用户中断（Ctrl-C / SIGINT） | 人为取消，无需处理 |
+
+脚本自身的 pre-flight 失败仍使用退出码 `1-4`（`1`=参数/配置/取消、`2`=Poetry 缺失、`3`=依赖安装失败、`4`=Python 版本不符），与运行层的 `10+` 数值不冲突——编排器按 `>= 10` 判定为运行层结果。
+
+### 机器可读运行摘要（run_summary.json）
+
+每次 run 结束（含失败与 Ctrl-C 中断）都会原子写出一份 JSON 摘要，默认路径 `mobile/tmp/run_summary.json`（「最近一次 run」语义，已 gitignore）；可用 `--result-json <path>` 或环境变量 `HATICKETS_RESULT_JSON` 覆盖（需保留历史请带时间戳路径）。
+
+| 字段 | 含义 |
+|------|------|
+| `schema_version` | 摘要 schema 版本，当前 `1` |
+| `outcome` | `probe_ready` / `validation_ready` / `order_submitted` / `order_pending_payment` / `success`（兜底）/ `retries_exhausted` / `terminal_failure` / `config_or_device_error` / `interrupted` |
+| `exit_code` | 与进程退出码一致 |
+| `serial` | 本次生效的设备序列号（含 `--serial` 覆盖后的值），未配置为 `null` |
+| `mode` | `probe` / `validation` / `submit`；初始化失败时为 `null` |
+| `attempts` | 总执行轮次：外层尝试与快速重试各计 `1`（如外层 3 次 + 每次 8 轮快速重试全失败 = 27） |
+| `duration_ms` | 进程内运行总耗时（毫秒） |
+| `terminal_reason` | 不可重试原因或 `init_error: ...` / `run_error: ...` / `keyboard_interrupt`；无则 `null` |
+| `started_at` / `finished_at` | 本地时区 ISO 时间戳 |
+
+示例：
+
+```json
+{
+  "schema_version": 1,
+  "outcome": "probe_ready",
+  "exit_code": 0,
+  "serial": "emulator-5554",
+  "mode": "probe",
+  "attempts": 1,
+  "duration_ms": 8432,
+  "terminal_reason": null,
+  "started_at": "2026-07-10T11:55:01+08:00",
+  "finished_at": "2026-07-10T11:55:09+08:00"
+}
+```
+
+写摘要失败（目录不可写、磁盘满）只记 warning，绝不影响退出码。
+
+### --serial：同一份 config 复用到多台设备
+
+`--serial` 只经环境变量 `HATICKETS_SERIAL` 透传给 `Config.load_config`，**不会改写配置文件**；同一份 config 可被 N 台设备复用：
+
+```bash
+./mobile/scripts/start_ticket_grabbing.sh --probe --yes --serial emulator-5554
+./mobile/scripts/start_ticket_grabbing.sh --probe --yes --serial emulator-5556 --result-json /tmp/dev2.json
+```
+
+脚本会先用 `adb devices` 精确校验 `--serial` 指定的设备在线（不存在/未授权/离线立即 `exit 12`，避免 u2 长超时）。也可以直接设环境变量（对 `run_from_prompt.sh` 等走同一 `Config.load_config` 的入口同样生效）：
+
+```bash
+HATICKETS_SERIAL=emulator-5554 HATICKETS_RESULT_JSON=/tmp/run.json \
+  ./mobile/scripts/start_ticket_grabbing.sh --probe --yes
+```
+
+环境变量为空/纯空白时视为未设置，回落配置文件的 `serial` 字段。
+
+### 无人值守编排示例（systemd / cron）
+
+```ini
+# systemd unit 片段：失败自动重启，但对「不可重试失败」与「配置/设备错误」绝不重启
+[Service]
+ExecStart=/path/to/HaTickets/mobile/scripts/start_ticket_grabbing.sh --probe --yes --serial emulator-5554
+Restart=on-failure
+RestartPreventExitStatus=11 12
+```
+
+```bash
+# cron / shell 编排：按退出码分流
+./mobile/scripts/start_ticket_grabbing.sh --probe --yes --serial "$SERIAL"
+case $? in
+    0)  echo "成功" ;;
+    10) echo "重试耗尽，可切换备用设备重跑" ;;
+    11) echo "不可重试失败（勿自动重跑，可能重复下单）"; exit 1 ;;
+    12) echo "配置/设备错误，检查环境" ;;
+esac
+```
+
 ## 常见问题
 
 ### 1. `adb: command not found`
 
-说明 Android SDK 的 `platform-tools` 没进环境变量。
-最直接的办法是：
+说明 `adb` 不在环境变量里。最简单的办法（macOS，无需安装 Android Studio、无需设置 `ANDROID_HOME`）：
+
+```bash
+brew install android-platform-tools
+```
+
+启动脚本只要求 `adb` 在 `PATH` 中即可，`ANDROID_HOME` 未设置不再报错。
+如果你已安装 Android Studio，也可以：
 
 ```bash
 export ANDROID_HOME="$HOME/Library/Android/sdk"
@@ -363,7 +479,7 @@ export PATH="$ANDROID_HOME/platform-tools:$PATH"
 
 最常见原因是：
 
-- [mobile/config.jsonc](./mobile/config.jsonc) 里的 `users` 写的是占位符，不是真实名字
+- `mobile/config.jsonc` 里的 `users` 写的是占位符，不是真实名字
 - 你的大麦账号里还没有配置对应观演人
 
 ### 5. 脚本没有进入确认页
@@ -389,10 +505,10 @@ export PATH="$ANDROID_HOME/platform-tools:$PATH"
 如果你想正式开始抢票，直接执行：
 
 ```bash
-./mobile/scripts/start_ticket_grabbing.sh --yes
+./mobile/scripts/start_ticket_grabbing.sh --commit --yes
 ```
 
-如果当前配置里还是探测模式，这条命令会先用醒目的日志提示你，然后自动把配置切到正式抢票模式再继续执行。
+如果当前配置里还是探测模式，这条命令会先用醒目的日志提示你，把配置切到正式抢票模式，并在打印下单摘要、倒数 3 秒后再继续执行。
 
 另外再检查：
 

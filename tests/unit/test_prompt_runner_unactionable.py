@@ -247,7 +247,9 @@ class TestMainActionableCheck:
                 }
 
         monkeypatch.setattr(
-            prompt_runner, "_load_base_config_dict", lambda _p: base_config_dict
+            prompt_runner,
+            "_load_base_config_dict",
+            lambda _p, **_kw: base_config_dict,
         )
         monkeypatch.setattr(prompt_runner, "parse_prompt", lambda _p: fake_pr)
         monkeypatch.setattr(
@@ -256,8 +258,11 @@ class TestMainActionableCheck:
         monkeypatch.setattr(
             prompt_runner, "_auto_sync_device_config", lambda c, _m: (c, None)
         )
+        # U-05 后 load_config 多了 strict_placeholders 关键字参数，mock 需容忍
         monkeypatch.setattr(
-            Config, "load_config", classmethod(lambda cls, _p: FakeConfig())
+            Config,
+            "load_config",
+            classmethod(lambda cls, _p=None, **_kw: FakeConfig()),
         )
         monkeypatch.setattr(prompt_runner, "DamaiBot", FakeBot)
         monkeypatch.setattr(

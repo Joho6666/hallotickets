@@ -42,6 +42,15 @@
 - #23 `select_search_result` 0/1/N 分流（含 strict 模式）
 - #24 `PageProbe` unknown_threshold 阈值与 `force_state`
 
+### 4.5 资金防护闸门（U-01，10 min，真机）
+
+全程用一次性配置副本（`cp mobile/config.jsonc /tmp/ht-gate.jsonc` 并给命令追加 `--config /tmp/ht-gate.jsonc`），严禁真实下单：
+
+- `--commit`（无 `--yes`）出现确认词提示后**故意输错**（如小写 `go`）→ 应 exit 1 且明示「配置文件未被修改」，diff 副本确认逐字节未变
+- `--commit --yes` → 跳过确认词，但「正式下单摘要」+ 3 秒倒数仍无条件出现 → **倒数期间必须 Ctrl-C 中止**（绝不让倒数走完）；随后立即 `--probe --yes` 把副本翻回安全态
+- 裸 `--yes` → 应立即 exit 1 并打印含 `--commit --yes` 的迁移指引，bot 未启动
+- print_commit_summary 降级分支：核对摘要中演出/票档/观演人/场次与副本内容逐项一致（heredoc 失败时应看到 grep 原文降级输出，而非放行/阻断）
+
 ### 5. 性能基准（10 min）
 
 ```bash

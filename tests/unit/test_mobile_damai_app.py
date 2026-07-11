@@ -687,11 +687,16 @@ class TestAutoNavigation:
                     bot, "smart_wait_for_element", return_value=True
                 ) as wait_for_element:
                     with patch.object(bot, "smart_wait_and_click") as smart_click:
-                        result = bot._fast_retry_from_current_state()
+                        with patch.object(bot, "_submit_order_fast") as submit_fast:
+                            result = bot._fast_retry_from_current_state()
 
         assert result is True
+        # 与主路径 validation 口径一致，成功日志按真实结局输出
+        assert bot._last_run_outcome == "validation_ready"
         wait_for_element.assert_called_once()
         smart_click.assert_not_called()
+        # if_commit_order=False 绝不提交
+        submit_fast.assert_not_called()
 
     def test_run_with_retry_stops_on_terminal_failure(self, bot):
         with patch("mobile.damai_app.time.sleep"):
@@ -1494,6 +1499,72 @@ class TestRunTicketGrabbing:
         assert bot._last_run_outcome == "order_pending_payment"
         assert bot._terminal_failure_reason is None
 
+    @pytest.mark.parametrize("submit_result", ["sold_out", "captcha"])
+    def test_run_ticket_grabbing_sold_out_and_captcha_record_outcome(
+        self, bot, submit_result
+    ):
+        """sold_out/captcha 主路径记录真实 outcome 且保持可重试语义（U-10 增量）。"""
+        with patch.object(bot, "dismiss_startup_popups"):
+            with patch.object(
+                bot,
+                "probe_current_page",
+                return_value={
+                    "state": "detail_page",
+                    "purchase_button": True,
+                    "price_container": True,
+                    "quantity_picker": False,
+                    "submit_button": False,
+                },
+            ):
+                with patch.object(bot, "wait_for_sale_start"):
+                    with patch.object(
+                        bot,
+                        "_enter_purchase_flow_from_detail_page",
+                        return_value={
+                            "state": "sku_page",
+                            "price_container": True,
+                            "reservation_mode": False,
+                        },
+                    ):
+                        with patch.object(
+                            bot, "_wait_for_submit_ready", return_value=True
+                        ):
+                            with patch.object(
+                                bot,
+                                "_ensure_attendees_selected_on_confirm_page",
+                                return_value=True,
+                            ):
+                                with patch.object(
+                                    bot, "smart_wait_and_click", return_value=True
+                                ):
+                                    with patch.object(
+                                        bot, "ultra_fast_click", return_value=True
+                                    ):
+                                        with patch.object(bot, "ultra_batch_click"):
+                                            with patch.object(
+                                                bot,
+                                                "_submit_order_fast",
+                                                return_value=submit_result,
+                                            ):
+                                                with patch(
+                                                    "mobile.damai_app.time"
+                                                ) as mock_time:
+                                                    mock_time.time.side_effect = (
+                                                        _make_time_side_effect(0.0, 1.0)
+                                                    )
+                                                    mock_price_container = Mock()
+                                                    mock_target = _make_mock_element()
+                                                    mock_price_container.find_element.return_value = mock_target
+                                                    bot.driver.find_element.return_value = mock_price_container
+                                                    bot.driver.find_elements.return_value = []
+
+                                                    result = bot.run_ticket_grabbing()
+
+        assert result is False
+        assert bot._last_run_outcome == submit_result
+        # 不设 terminal，run_with_retry 仍可按 fast_retry_count 继续尝试
+        assert bot._terminal_failure_reason is None
+
     def test_run_ticket_grabbing_returns_success_when_pending_order_dialog_detected_early(
         self, bot
     ):
@@ -2288,6 +2359,48 @@ class TestPageStateHelpers:
 
 
 # ---------------------------------------------------------------------------
+# _finalize_submit_result — 主路径与快速重试共享的提交结果映射（U-10）
+# ---------------------------------------------------------------------------
+
+
+class TestFinalizeSubmitResult:
+    @pytest.mark.parametrize(
+        "submit_result,expected_return,expected_outcome,expected_terminal",
+        [
+            ("success", True, "order_submitted", None),
+            ("existing_order", True, "order_pending_payment", None),
+            ("sold_out", False, "sold_out", None),
+            ("captcha", False, "captcha", None),
+            ("timeout", False, None, "submit_unverified"),
+            # 未知值（如 purchase_flow 防御性 "failed"）必须 fail closed
+            ("garbage", False, None, "submit_unverified"),
+        ],
+    )
+    def test_finalize_submit_result_maps_all_results(
+        self, bot, submit_result, expected_return, expected_outcome, expected_terminal
+    ):
+        result = bot._finalize_submit_result(submit_result)
+
+        assert result is expected_return
+        assert bot._last_run_outcome == expected_outcome
+        assert bot._terminal_failure_reason == expected_terminal
+
+    def test_finalize_submit_result_elapsed_only_with_start_time(self, bot, caplog):
+        """耗时后缀仅在提供 start_time 时输出，且成功文案与主路径逐字一致。"""
+        import re as _re
+
+        with caplog.at_level("INFO", logger="mobile.damai_app"):
+            bot._finalize_submit_result("success")
+        assert "抢票成功！" in caplog.text
+        assert "耗时" not in caplog.text
+
+        caplog.clear()
+        with caplog.at_level("INFO", logger="mobile.damai_app"):
+            bot._finalize_submit_result("success", start_time=_time_module.time())
+        assert _re.search(r"抢票成功！耗时: \d+\.\d{2}秒", caplog.text)
+
+
+# ---------------------------------------------------------------------------
 # run_with_retry
 # ---------------------------------------------------------------------------
 
@@ -2435,6 +2548,73 @@ class TestRunWithRetry:
 
         assert result is True
         assert "抢票成功：已提交订单" in caplog.text
+
+    def _drive_run_with_retry_fast_retry_confirm_page(
+        self, bot, caplog, submit_result, fast_retry_count=1
+    ):
+        """公共驱动：首轮失败后走真实 _fast_retry_from_current_state 落确认页提交（U-10）。"""
+        bot.config.fast_retry_count = fast_retry_count
+
+        with caplog.at_level("INFO", logger="mobile.damai_app"):
+            with patch.object(bot, "run_ticket_grabbing", return_value=False):
+                with patch.object(bot, "_setup_driver"):
+                    with patch("mobile.damai_app.time.sleep"):
+                        with patch.object(
+                            bot,
+                            "probe_current_page",
+                            return_value={
+                                "state": "order_confirm_page",
+                                "purchase_button": False,
+                                "price_container": False,
+                                "quantity_picker": False,
+                                "submit_button": True,
+                            },
+                        ):
+                            with patch.object(
+                                bot,
+                                "_ensure_attendees_selected_on_confirm_page",
+                                return_value=True,
+                            ):
+                                with patch.object(
+                                    bot,
+                                    "_submit_order_fast",
+                                    return_value=submit_result,
+                                ) as submit_fast:
+                                    result = bot.run_with_retry(max_retries=1)
+        return result, submit_fast
+
+    def test_run_with_retry_no_fast_retry_success_log_on_captcha(self, bot, caplog):
+        """verify 返回 captcha 时快速重试不得打「快速重试成功」（U-10 核心断言）。"""
+        result, submit_fast = self._drive_run_with_retry_fast_retry_confirm_page(
+            bot, caplog, "captcha"
+        )
+
+        assert result is False
+        assert "快速重试成功" not in caplog.text
+        assert bot._last_run_outcome == "captcha"
+        submit_fast.assert_called_once()
+
+    def test_run_with_retry_fast_retry_success_logs_verified_message(self, bot, caplog):
+        """「快速重试成功」只在 verify 真正确认下单后出现。"""
+        result, submit_fast = self._drive_run_with_retry_fast_retry_confirm_page(
+            bot, caplog, "success"
+        )
+
+        assert result is True
+        assert "快速重试成功：抢票成功：已提交订单" in caplog.text
+        submit_fast.assert_called_once()
+
+    def test_run_with_retry_fast_retry_timeout_terminal_stops_retries(self, bot, caplog):
+        """timeout fail-closed：terminal 中止剩余快速重试，防止重复提交。"""
+        result, submit_fast = self._drive_run_with_retry_fast_retry_confirm_page(
+            bot, caplog, "timeout", fast_retry_count=3
+        )
+
+        assert result is False
+        # terminal 中止后续快速重试 — 只提交了一次
+        submit_fast.assert_called_once()
+        assert "快速重试遇到不可重试失败" in caplog.text
+        assert bot._terminal_failure_reason == "submit_unverified"
 
 
 # ---------------------------------------------------------------------------
@@ -2922,7 +3102,11 @@ class TestFastRetry:
         run_tg.assert_called_once()
 
     def test_fast_retry_from_order_confirm_page(self, bot):
-        """probe returns order_confirm_page, re-attempts submit only."""
+        """probe returns order_confirm_page, re-submits and verifies via _submit_order_fast.
+
+        U-10：不允许仅凭 smart_wait_and_click 点击成功就虚报抢票成功，
+        必须经 _submit_order_fast（内部 verify_order_result）确认。
+        """
         with patch.object(
             bot,
             "probe_current_page",
@@ -2935,12 +3119,180 @@ class TestFastRetry:
             },
         ):
             with patch.object(
-                bot, "smart_wait_and_click", return_value=True
-            ) as smart_click:
-                result = bot._fast_retry_from_current_state()
+                bot, "_ensure_attendees_selected_on_confirm_page", return_value=True
+            ):
+                with patch.object(
+                    bot, "_submit_order_fast", return_value="success"
+                ) as submit_fast:
+                    with patch.object(bot, "smart_wait_and_click") as smart_click:
+                        result = bot._fast_retry_from_current_state()
 
         assert result is True
-        smart_click.assert_called_once()
+        assert bot._last_run_outcome == "order_submitted"
+        submit_fast.assert_called_once()
+        # 旧旁路已死：点击不再被直接当作成功
+        smart_click.assert_not_called()
+
+    @pytest.mark.parametrize(
+        "submit_result,expected_return,expected_outcome,expected_terminal",
+        [
+            ("success", True, "order_submitted", None),
+            ("existing_order", True, "order_pending_payment", None),
+            ("sold_out", False, "sold_out", None),
+            ("captcha", False, "captcha", None),
+            ("timeout", False, None, "submit_unverified"),
+        ],
+    )
+    def test_fast_retry_confirm_page_maps_submit_result(
+        self, bot, submit_result, expected_return, expected_outcome, expected_terminal
+    ):
+        """快速重试确认页分支对各 verify 结果的返回值/outcome/terminal 映射（U-10）。"""
+        with patch.object(
+            bot,
+            "probe_current_page",
+            return_value={
+                "state": "order_confirm_page",
+                "purchase_button": False,
+                "price_container": False,
+                "quantity_picker": False,
+                "submit_button": True,
+            },
+        ):
+            with patch.object(
+                bot, "_ensure_attendees_selected_on_confirm_page", return_value=True
+            ):
+                with patch.object(
+                    bot, "_submit_order_fast", return_value=submit_result
+                ) as submit_fast:
+                    result = bot._fast_retry_from_current_state()
+
+        assert result is expected_return
+        assert bot._last_run_outcome == expected_outcome
+        assert bot._terminal_failure_reason == expected_terminal
+        submit_fast.assert_called_once()
+
+    @pytest.mark.parametrize(
+        "submit_result",
+        ["success", "existing_order", "sold_out", "captcha", "timeout"],
+    )
+    def test_submit_result_semantics_consistent_between_main_and_fast_retry(
+        self, bot, submit_result
+    ):
+        """主路径与快速重试对同一 verify 结果的 (返回值, outcome, terminal) 必须一致（U-10）。"""
+        # (a) 主路径 run_ticket_grabbing 直达提交段
+        with patch.object(bot, "dismiss_startup_popups"):
+            with patch.object(
+                bot,
+                "probe_current_page",
+                return_value={
+                    "state": "detail_page",
+                    "purchase_button": True,
+                    "price_container": True,
+                    "quantity_picker": False,
+                    "submit_button": False,
+                },
+            ):
+                with patch.object(bot, "wait_for_sale_start"):
+                    with patch.object(
+                        bot,
+                        "_enter_purchase_flow_from_detail_page",
+                        return_value={
+                            "state": "sku_page",
+                            "price_container": True,
+                            "reservation_mode": False,
+                        },
+                    ):
+                        with patch.object(
+                            bot, "_wait_for_submit_ready", return_value=True
+                        ):
+                            with patch.object(
+                                bot,
+                                "_ensure_attendees_selected_on_confirm_page",
+                                return_value=True,
+                            ):
+                                with patch.object(
+                                    bot, "smart_wait_and_click", return_value=True
+                                ):
+                                    with patch.object(
+                                        bot, "ultra_fast_click", return_value=True
+                                    ):
+                                        with patch.object(bot, "ultra_batch_click"):
+                                            with patch.object(
+                                                bot,
+                                                "_submit_order_fast",
+                                                return_value=submit_result,
+                                            ):
+                                                with patch(
+                                                    "mobile.damai_app.time"
+                                                ) as mock_time:
+                                                    mock_time.time.side_effect = (
+                                                        _make_time_side_effect(0.0, 1.0)
+                                                    )
+                                                    mock_price_container = Mock()
+                                                    mock_target = _make_mock_element()
+                                                    mock_price_container.find_element.return_value = mock_target
+                                                    bot.driver.find_element.return_value = mock_price_container
+                                                    bot.driver.find_elements.return_value = []
+
+                                                    main_result = bot.run_ticket_grabbing()
+
+        main_triplet = (
+            main_result,
+            bot._last_run_outcome,
+            bot._terminal_failure_reason,
+        )
+
+        # (b) 快速重试 order_confirm_page 分支（手动清零实例级残留状态）
+        bot._last_run_outcome = None
+        bot._terminal_failure_reason = None
+        with patch.object(
+            bot,
+            "probe_current_page",
+            return_value={
+                "state": "order_confirm_page",
+                "purchase_button": False,
+                "price_container": False,
+                "quantity_picker": False,
+                "submit_button": True,
+            },
+        ):
+            with patch.object(
+                bot, "_ensure_attendees_selected_on_confirm_page", return_value=True
+            ):
+                with patch.object(
+                    bot, "_submit_order_fast", return_value=submit_result
+                ):
+                    retry_result = bot._fast_retry_from_current_state()
+
+        retry_triplet = (
+            retry_result,
+            bot._last_run_outcome,
+            bot._terminal_failure_reason,
+        )
+        assert main_triplet == retry_triplet
+
+    def test_fast_retry_confirm_page_attendee_guard_blocks_submit(self, bot):
+        """观演人守卫失败时不得触碰提交链路（守卫顺序回归）。"""
+        with patch.object(
+            bot,
+            "probe_current_page",
+            return_value={
+                "state": "order_confirm_page",
+                "purchase_button": False,
+                "price_container": False,
+                "quantity_picker": False,
+                "submit_button": True,
+            },
+        ):
+            with patch.object(
+                bot, "_ensure_attendees_selected_on_confirm_page", return_value=False
+            ):
+                with patch.object(bot, "_submit_order_fast") as submit_fast:
+                    result = bot._fast_retry_from_current_state()
+
+        assert result is False
+        assert bot._terminal_failure_reason == "attendee_unselected"
+        submit_fast.assert_not_called()
 
     def test_fast_retry_from_order_confirm_page_in_safe_mode_waits_for_submit_button(
         self, bot
@@ -2964,11 +3316,15 @@ class TestFastRetry:
                 with patch.object(
                     bot, "smart_wait_for_element", return_value=True
                 ) as wait_element:
-                    result = bot._fast_retry_from_current_state()
+                    with patch.object(bot, "_submit_order_fast") as submit_fast:
+                        result = bot._fast_retry_from_current_state()
 
         assert result is True
+        assert bot._last_run_outcome == "validation_ready"
         ensure_attendees.assert_called_once()
         wait_element.assert_called_once()
+        # 安全模式下绝不触碰提交链路
+        submit_fast.assert_not_called()
 
     def test_fast_retry_returns_success_when_pending_order_dialog_detected(self, bot):
         with patch.object(
@@ -5236,3 +5592,84 @@ class TestSavePriceFailureDump:
         bot.d.dump_hierarchy = Mock(side_effect=RuntimeError("device gone"))
         result = bot._save_price_failure_dump()
         assert result is None
+
+
+# ---------------------------------------------------------------------------
+# U-12 — _attempts_made 总执行轮次计数（运行摘要 attempts 字段的数据源）
+# ---------------------------------------------------------------------------
+
+
+class TestAttemptsMade:
+    """attempts 语义（README 定义）：外层尝试与快速重试各 +1 的『总执行轮次』。"""
+
+    def test_attempts_made_initialized_zero(self, bot):
+        assert bot._attempts_made == 0
+
+    def test_attempts_success_first_try_is_one(self, bot):
+        with patch.object(bot, "run_ticket_grabbing", return_value=True):
+            with patch("mobile.damai_app.time"):
+                result = bot.run_with_retry(max_retries=3)
+        assert result is True
+        assert bot._attempts_made == 1
+
+    def test_attempts_counts_outer_and_fast_retries(self, bot):
+        """max_retries=2 + fast_retry_count=2 全失败 → 外层1+快速2+外层1+快速2=6。"""
+        bot.config.fast_retry_count = 2
+        with patch.object(bot, "run_ticket_grabbing", return_value=False):
+            with patch.object(
+                bot, "_fast_retry_from_current_state", return_value=False
+            ):
+                with patch.object(bot, "_setup_driver"):
+                    with patch("mobile.damai_app.time"):
+                        result = bot.run_with_retry(max_retries=2)
+        assert result is False
+        assert bot._attempts_made == 6
+
+    def test_attempts_stops_at_terminal_failure(self, bot):
+        """terminal failure 后 fast_retry 不再累加。"""
+
+        def fail_terminal(initial_page_probe=None):
+            bot._terminal_failure_reason = "sold_out"
+            return False
+
+        with patch.object(bot, "run_ticket_grabbing", side_effect=fail_terminal):
+            with patch.object(
+                bot, "_fast_retry_from_current_state", return_value=False
+            ) as fast_retry:
+                with patch("mobile.damai_app.time"):
+                    result = bot.run_with_retry(max_retries=3)
+        assert result is False
+        assert bot._attempts_made == 1
+        fast_retry.assert_not_called()
+
+    def test_attempts_counts_fast_retry_success(self, bot):
+        """外层失败后第 1 次 fast_retry 成功 → 总轮次 2。"""
+        with patch.object(bot, "run_ticket_grabbing", return_value=False):
+            with patch.object(
+                bot, "_fast_retry_from_current_state", side_effect=[True]
+            ):
+                with patch("mobile.damai_app.time"):
+                    result = bot.run_with_retry(max_retries=3)
+        assert result is True
+        assert bot._attempts_made == 2
+
+    def test_attempts_reset_between_runs(self, bot):
+        """run_with_retry 开头 reset 生效：连跑两次各成功一次 → 第二次结束为 1。"""
+        with patch.object(bot, "run_ticket_grabbing", return_value=True):
+            with patch("mobile.damai_app.time"):
+                bot.run_with_retry(max_retries=3)
+                bot.run_with_retry(max_retries=3)
+        assert bot._attempts_made == 1
+
+    def test_run_with_retry_return_value_unchanged(self, bot):
+        """守护『只加计数不改控制流』：True/False 返回语义与改动前一致。"""
+        with patch.object(bot, "run_ticket_grabbing", return_value=True):
+            with patch("mobile.damai_app.time"):
+                assert bot.run_with_retry(max_retries=1) is True
+        with patch.object(bot, "run_ticket_grabbing", return_value=False):
+            with patch.object(
+                bot, "_fast_retry_from_current_state", return_value=False
+            ):
+                with patch.object(bot, "_setup_driver"):
+                    with patch("mobile.damai_app.time"):
+                        assert bot.run_with_retry(max_retries=2) is False
