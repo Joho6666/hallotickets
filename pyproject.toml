@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "damai-ticket-automation"
-version = "0.1.0"
+version = "0.5.0"
 description = "Automated ticket purchasing system for Damai.com"
 authors = ["Your Name <your.email@example.com>"]
 readme = "README.md"
