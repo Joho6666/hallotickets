@@ -1588,6 +1588,45 @@ class TestRunTicketGrabbing:
         assert result is True
         assert bot._last_run_outcome == "order_pending_payment"
 
+    def test_run_ticket_grabbing_probe_mode_pending_order_is_not_grab_success(self, bot):
+        # 2026-07-11 真机回归：probe_only 从不提交，遇到预先存在的未支付订单弹窗
+        # 必须据实上报（preexisting_pending_order），绝不能记「抢票成功」——否则
+        # 安全探测用户会误以为 probe 下了单（信任问题，U-10 同源）。
+        bot.config.probe_only = True
+        bot.config.if_commit_order = False
+        with patch.object(bot, "dismiss_startup_popups"):
+            with patch.object(bot, "check_session_valid", return_value=True):
+                with patch.object(
+                    bot,
+                    "probe_current_page",
+                    return_value={
+                        "state": "pending_order_dialog",
+                        "purchase_button": False,
+                        "price_container": False,
+                        "quantity_picker": False,
+                        "submit_button": False,
+                        "reservation_mode": False,
+                        "pending_order_dialog": True,
+                    },
+                ):
+                    result = bot.run_ticket_grabbing()
+
+        assert result is True
+        assert bot._last_run_outcome == "preexisting_pending_order"
+
+    def test_log_success_outcome_preexisting_pending_order_not_grab_success(
+        self, bot, caplog
+    ):
+        # 成功日志映射也不得对该 outcome 说「抢票成功」
+        import logging as _logging
+
+        bot._set_run_outcome("preexisting_pending_order")
+        with caplog.at_level(_logging.INFO):
+            bot._log_success_outcome("快速重试成功：")
+        joined = " ".join(r.message for r in caplog.records)
+        assert "抢票成功" not in joined
+        assert "未支付订单" in joined
+
     def test_run_ticket_grabbing_rush_mode_skips_detail_prepare_and_reprobe_when_no_sell_time(
         self, bot
     ):

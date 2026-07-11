@@ -351,11 +351,7 @@ class RecoveryStrategiesMixin:
             result = self._submit_order_fast(submit_selectors)
             return self._finalize_submit_result(result)
         elif state == "pending_order_dialog":
-            self._set_run_outcome("order_pending_payment")
-            logger.info(
-                "检测到未支付订单弹窗（已占单待支付），请立即前往订单页完成支付"
-            )
-            return True
+            return self._report_pending_order_dialog()
         else:
             if self.config.auto_navigate:
                 return (
