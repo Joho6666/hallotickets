@@ -42,9 +42,12 @@ preflight_check_adb() {
 }
 
 # $1=key $2=config_file → 打印字符串值（null / 缺失 / 非字符串输出空）
+# 注意：不能用 `t;s/.*//` 的分支写法——macOS BSD sed 把分号后内容当 label，
+# 报 undefined label 且输出为空，导致 serial 预检在 macOS 静默失效（CI 实测）。
+# `-n` + `p` 仅在替换成功时打印，GNU/BSD 行为一致。
 _preflight_extract_string_field() {
     grep -E "^[[:space:]]*\"$1\"[[:space:]]*:" "$2" 2>/dev/null | head -1 \
-        | sed -E "s/.*\"$1\"[[:space:]]*:[[:space:]]*\"([^\"]*)\".*/\1/;t;s/.*//"
+        | sed -E -n "s/.*\"$1\"[[:space:]]*:[[:space:]]*\"([^\"]*)\".*/\1/p"
 }
 
 # $1=config_file

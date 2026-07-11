@@ -57,8 +57,14 @@ def script_env(tmp_path):
     tmpbin = tmp_path / "bin"
     tmpbin.mkdir()
     (tmpbin / "poetry").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    # 假 adb 需实现 get-state：preflight_check_device 对配置里的 serial 走
+    # `adb -s <serial> get-state` 精确预检（BSD sed 提取修复后 macOS 也会走到）
     (tmpbin / "adb").write_text(
-        '#!/bin/sh\nprintf "List of devices attached\\nFAKESERIAL\\tdevice\\n"\n',
+        "#!/bin/sh\n"
+        'case "$*" in\n'
+        '  *get-state*) printf "device\\n" ;;\n'
+        '  *) printf "List of devices attached\\nFAKESERIAL\\tdevice\\n" ;;\n'
+        "esac\n",
         encoding="utf-8",
     )
     os.chmod(tmpbin / "poetry", 0o755)
