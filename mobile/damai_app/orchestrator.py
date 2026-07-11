@@ -192,6 +192,29 @@ class DamaiBot(
         """Record the terminal outcome for the latest run attempt."""
         self._last_run_outcome = outcome
 
+    def _report_pending_order_dialog(self):
+        """检测到「未支付订单弹窗」时的统一上报（真话优先，U-10 同源）。
+
+        probe_only 从不提交任何订单，此弹窗必然是账号里预先存在的占单（非本次
+        安全探测产生）。旧实现无论何种模式都记 ``order_pending_payment`` →
+        「抢票成功：检测到未支付订单」，会误导安全探测用户以为 probe 下了单
+        （2026-07-11 真机实测）。据实分流，返回 True 语义不变：
+        - probe_only：``preexisting_pending_order`` —— 只做探测提醒，不称成功；
+        - 正式/开发模式：``order_pending_payment`` —— 本轮流程占单，沿用原语义。
+        """
+        if self.config.probe_only:
+            self._set_run_outcome("preexisting_pending_order")
+            logger.info(
+                "探测提醒：账号存在未支付订单（非本次安全探测产生），"
+                "如需可自行前往订单页处理；本次探测未做任何提交"
+            )
+        else:
+            self._set_run_outcome("order_pending_payment")
+            logger.info(
+                "检测到未支付订单弹窗（已占单待支付），请立即前往订单页完成支付"
+            )
+        return True
+
     def _execution_mode_key(self):
         """Return the current execution mode key."""
         if self.config.probe_only:
@@ -232,6 +255,7 @@ class DamaiBot(
             "validation_ready": "开发验证成功：已到订单确认页，未提交订单",
             "order_submitted": "抢票成功：已提交订单",
             "order_pending_payment": "抢票成功：检测到未支付订单，请立即前往支付完成下单",
+            "preexisting_pending_order": "探测提醒：账号存在未支付订单（非本次探测产生），本次未做任何提交",
             "order_flow_completed": "抢票流程完成：已执行提交，等待后续结果确认",
         }
         logger.info(
@@ -760,11 +784,7 @@ class DamaiBot(
                     return False
 
             if page_probe["state"] == "pending_order_dialog":
-                self._set_run_outcome("order_pending_payment")
-                logger.info(
-                    "检测到未支付订单弹窗（已占单待支付），请立即前往订单页完成支付"
-                )
-                return True
+                return self._report_pending_order_dialog()
 
             if page_probe["state"] not in {
                 "detail_page",
@@ -779,11 +799,7 @@ class DamaiBot(
                         return False
                     page_probe = self.probe_current_page()
                     if page_probe["state"] == "pending_order_dialog":
-                        self._set_run_outcome("order_pending_payment")
-                        logger.info(
-                            "检测到未支付订单弹窗（已占单待支付），请立即前往订单页完成支付"
-                        )
-                        return True
+                        return self._report_pending_order_dialog()
                 else:
                     logger.warning("当前不在演出详情页，请先手动打开目标演出详情页")
                     return False
