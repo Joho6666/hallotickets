@@ -55,5 +55,11 @@ mobile/tmp_*.xml
 # Internal R&D PM workspace (not for public consumption)
 reference/
 
+# Legacy desktop prototype: direct Cookie/API implementation kept locally only.
+desktop/
+docs/api-update-research.md
+docs/desktop-ticket-logic.md
+docs/desktop-usage-guide.md
+
 # Local, non-committed Claude Code project memory (auto-loaded; overrides/augments CLAUDE.md)
 CLAUDE.local.md

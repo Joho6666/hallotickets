@@ -2,6 +2,8 @@
 
 import json
 import logging
+import re
+import sys
 from pathlib import Path
 
 import pytest
@@ -344,7 +346,8 @@ class TestRushSubFlags:
 class TestMobileConfigLoadConfig:
     def test_load_config_dict_from_missing_path_raises(self, tmp_path):
         with pytest.raises(
-            FileNotFoundError, match=f"配置文件未找到: {tmp_path / 'missing.jsonc'}"
+            FileNotFoundError,
+            match=re.escape(f"配置文件未找到: {tmp_path / 'missing.jsonc'}"),
         ):
             _load_config_dict_from_path(tmp_path / "missing.jsonc")
 
@@ -1603,6 +1606,7 @@ class TestUpdateRuntimeModeContract:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="Bash syntax check requires a Unix shell")
 def test_start_script_mentions_bak_hint_and_syntax_ok():
     import subprocess
 

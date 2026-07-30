@@ -8,6 +8,7 @@ README 与 quick-start 的手动配置示例块用 <!-- CONFIG_EXAMPLE:BEGIN/END
 import json
 import re
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -150,6 +151,7 @@ class TestScriptGuards:
     def test_script_no_item_url_hint(self):
         assert "item_url" not in SCRIPT.read_text(encoding="utf-8")
 
+    @pytest.mark.skipif(sys.platform == "win32", reason="Bash syntax check requires a Unix shell")
     def test_script_bash_syntax_ok(self):
         r = subprocess.run(
             ["bash", "-n", str(SCRIPT)], capture_output=True, text=True, timeout=30

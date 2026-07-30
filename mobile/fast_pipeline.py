@@ -404,10 +404,12 @@ class FastPipeline:
             return bool(buy_coords)
         return False
 
-    def run_cold_validation(self, start_time):
-        """Fast cold validation: XML dump -> shell batch -> concurrent polling.
+    def run_cold_validation(self, start_time, finalize=True):
+        """Fast cold path: XML dump -> shell batch -> concurrent polling.
 
-        Returns True on success, None to fall back to the normal flow.
+        With ``finalize=False`` it stops at the confirmed order page so the
+        caller can take the single formal-submit action without re-running the
+        slow navigation and selector path.
         """
         bot = self._bot
 
@@ -426,7 +428,7 @@ class FastPipeline:
             return None
 
         if entry_probe["state"] == "order_confirm_page" or self._confirm_page_ready():
-            return self._finish_confirm(start_time)
+            return self._finish_confirm(start_time, finalize=finalize)
 
         if entry_probe["state"] != "sku_page":
             return None
@@ -484,10 +486,10 @@ class FastPipeline:
         if not confirmed:
             return None
 
-        return self._finish_confirm(start_time)
+        return self._finish_confirm(start_time, finalize=finalize)
 
-    def _finish_confirm(self, start_time):
-        """Shared tail for the cold pipeline: select attendees on confirm page."""
+    def _finish_confirm(self, start_time, *, finalize=True):
+        """Select attendees, optionally leaving formal submission to the caller."""
         bot = self._bot
         required_count = max(1, len(self._config.users or []))
         logger.info(f"检测到观演人未选择完成，尝试自动补选（已选 0/{required_count}）")
@@ -510,6 +512,9 @@ class FastPipeline:
             for checkbox in checkbox_elements[:required_count]:
                 bot._click_attendee_checkbox_fast(checkbox)
 
+        if not finalize:
+            logger.info("极速正式路径：已到订单确认页，交由单次提交步骤继续")
+            return True
         bot._set_run_outcome("validation_ready")
         logger.info('if_commit_order=False，已完成观演人勾选，停止在"立即提交"前')
         logger.info(
@@ -517,10 +522,10 @@ class FastPipeline:
         )
         return True
 
-    def run_warm_validation(self, start_time):
-        """Ultra-fast warm validation: blind shell clicks + concurrent polling.
+    def run_warm_validation(self, start_time, finalize=True):
+        """Ultra-fast warm path: blind shell clicks + concurrent polling.
 
-        Returns True on success, None to fall back to the normal flow.
+        ``finalize=False`` keeps the final submit decision in the orchestrator.
         """
         bot = self._bot
         coords = self._cached_coords
@@ -593,6 +598,9 @@ class FastPipeline:
         for c in attendees[:required_count]:
             bot._click_coordinates(*c)
 
+        if not finalize:
+            logger.info("极速正式路径：已到订单确认页，交由单次提交步骤继续")
+            return True
         bot._set_run_outcome("validation_ready")
         logger.info('if_commit_order=False，已完成观演人勾选，停止在"立即提交"前')
         logger.info(

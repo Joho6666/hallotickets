@@ -174,11 +174,50 @@ class TestInitialization:
         assert bot.config.users == ["UserA", "UserB"]
         assert bot.driver is not None
 
+    def test_get_current_app_info_returns_u2_package_and_activity(self, bot):
+        bot.d.app_current.return_value = {
+            "package": "com.eg.android.AlipayGphone",
+            "activity": "PayPwdHalfActivity",
+        }
+
+        assert bot._get_current_app_info() == {
+            "package": "com.eg.android.AlipayGphone",
+            "activity": "PayPwdHalfActivity",
+        }
+
     def test_setup_driver_connects_u2(self, bot):
         """_setup_driver connects via u2 and sets self.driver and self.d."""
         assert bot.driver is not None
         assert bot.d is not None
         assert bot.d is bot.driver
+
+    def test_fast_reconnect_rebinds_helpers_and_keeps_foreground(self, bot):
+        """A u2 disconnect must replace every helper's stale device session."""
+        replacement = Mock()
+        replacement.settings = {}
+        replacement.app_current = Mock(return_value={"package": "cn.damai"})
+
+        with patch("uiautomator2.connect", return_value=replacement):
+            with patch("mobile.damai_app.time.sleep"):
+                assert bot._reconnect_u2_fast() is True
+
+        assert bot.d is replacement
+        assert bot.driver is replacement
+        assert bot._attendee_sel._d is replacement
+        assert bot._price_sel._d is replacement
+        assert bot._navigator._d is replacement
+        replacement.app_start.assert_not_called()
+
+    def test_disconnect_after_submit_only_verifies_and_never_resubmits(self, bot):
+        """Transport loss after submit is ambiguous, so fail closed after verification."""
+        bot._submit_action_started = True
+        with patch.object(bot, "_reconnect_u2_fast", return_value=True):
+            with patch.object(bot, "verify_order_result", return_value="success") as verify:
+                with patch.object(bot, "run_ticket_grabbing") as run_again:
+                    assert bot._resume_after_disconnect(start_time=_time_module.time()) is True
+
+        verify.assert_called_once_with(timeout=4)
+        run_again.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
@@ -1769,6 +1808,42 @@ class TestRunTicketGrabbing:
 
         assert result is True
         batch_click.assert_not_called()
+
+    def test_run_ticket_grabbing_submits_directly_when_confirm_page_already_open(
+        self, bot
+    ):
+        """正式模式下若起跑即在确认页，应直接走提交热路径。"""
+        bot.config.if_commit_order = True
+
+        with patch.object(bot, "dismiss_startup_popups"):
+            with patch.object(
+                bot,
+                "probe_current_page",
+                return_value={
+                    "state": "order_confirm_page",
+                    "purchase_button": False,
+                    "price_container": False,
+                    "quantity_picker": False,
+                    "submit_button": True,
+                },
+            ):
+                with patch.object(
+                    bot,
+                    "_ensure_attendees_selected_on_confirm_page",
+                    return_value=True,
+                ):
+                    with patch.object(
+                        bot, "_submit_order_fast", return_value="success"
+                    ) as submit_fast:
+                        with patch("mobile.damai_app.time") as mock_time:
+                            mock_time.time.side_effect = _make_time_monotonic(
+                                start=0.0, step=0.2
+                            )
+                            result = bot.run_ticket_grabbing()
+
+        assert result is True
+        submit_fast.assert_called_once()
+        assert bot._last_run_outcome == "order_submitted"
 
 
 class TestPageStateHelpers:
@@ -3563,6 +3638,40 @@ class TestVerifyOrderResult:
 
         assert result == "success"
 
+    def test_verify_order_success_payment_password_text(self, bot):
+        """Payment password page text should count as cashier success."""
+
+        def has_element_side_effect(by, value):
+            return 'textContains("请输入支付密码")' in value
+
+        with patch.object(
+            bot,
+            "_get_current_app_info",
+            return_value={"package": "cn.damai", "activity": "SomeActivity"},
+        ):
+            with patch.object(bot, "_has_element", side_effect=has_element_side_effect):
+                with patch("mobile.damai_app.time") as mock_time:
+                    mock_time.time.side_effect = _make_time_side_effect(0.0, 0.1)
+                    result = bot.verify_order_result(timeout=5)
+
+        assert result == "success"
+
+    def test_verify_order_success_alipay_package(self, bot):
+        """Foreground Alipay package should count as payment success."""
+        with patch.object(
+            bot,
+            "_get_current_app_info",
+            return_value={
+                "package": "com.eg.android.AlipayGphone",
+                "activity": "com.alipay.mobile.payee.ui.PayPwdHalfActivity",
+            },
+        ):
+            with patch("mobile.damai_app.time") as mock_time:
+                mock_time.time.side_effect = _make_time_side_effect(0.0, 0.1)
+                result = bot.verify_order_result(timeout=5)
+
+        assert result == "success"
+
     def test_verify_order_generic_payment_text_does_not_count_as_success(self, bot):
         """Generic '支付' text should not be treated as a successful submit signal."""
         time_values = chain([0.0, 0.2, 0.5, 0.8, 1.1], repeat(1.1))
@@ -3571,7 +3680,11 @@ class TestVerifyOrderResult:
             # Simulate a page containing generic "支付" wording but no payment CTA.
             return 'textContains("支付")' in value and "未支付" not in value
 
-        with patch.object(bot, "_get_current_activity", return_value="SomeActivity"):
+        with patch.object(
+            bot,
+            "_get_current_app_info",
+            return_value={"package": "cn.damai", "activity": "SomeActivity"},
+        ):
             with patch.object(bot, "_has_element", side_effect=has_element_side_effect):
                 with patch("mobile.damai_app.time.time", side_effect=time_values):
                     with patch("mobile.damai_app.time.sleep"):
@@ -3604,7 +3717,11 @@ class TestVerifyOrderResult:
                 return True
             return False
 
-        with patch.object(bot, "_get_current_activity", return_value="SomeActivity"):
+        with patch.object(
+            bot,
+            "_get_current_app_info",
+            return_value={"package": "cn.damai", "activity": "SomeActivity"},
+        ):
             with patch.object(bot, "_has_element", side_effect=has_element_side_effect):
                 with patch("mobile.damai_app.time.time", side_effect=time_values):
                     with patch("mobile.damai_app.time.sleep"):
@@ -3618,7 +3735,11 @@ class TestVerifyOrderResult:
         def has_element_side_effect(by, value):
             return "已售罄" in value
 
-        with patch.object(bot, "_get_current_activity", return_value="SomeActivity"):
+        with patch.object(
+            bot,
+            "_get_current_app_info",
+            return_value={"package": "cn.damai", "activity": "SomeActivity"},
+        ):
             with patch.object(bot, "_has_element", side_effect=has_element_side_effect):
                 with patch("mobile.damai_app.time") as mock_time:
                     mock_time.time.side_effect = _make_time_side_effect(0.0, 0.1)
@@ -3635,7 +3756,11 @@ class TestVerifyOrderResult:
             # Return increasing time so we exceed timeout quickly
             return call_count[0] * 3.0
 
-        with patch.object(bot, "_get_current_activity", return_value="SomeActivity"):
+        with patch.object(
+            bot,
+            "_get_current_app_info",
+            return_value={"package": "cn.damai", "activity": "SomeActivity"},
+        ):
             with patch.object(bot, "_has_element", return_value=False):
                 with patch("mobile.damai_app.time") as mock_time:
                     mock_time.time = mock_time_func
@@ -3657,7 +3782,11 @@ class TestVerifyOrderResult:
                 return True
             return False
 
-        with patch.object(bot, "_get_current_activity", return_value="SomeActivity"):
+        with patch.object(
+            bot,
+            "_get_current_app_info",
+            return_value={"package": "cn.damai", "activity": "SomeActivity"},
+        ):
             with patch.object(bot, "_has_element", side_effect=has_element_side_effect):
                 with patch("mobile.damai_app.time") as mock_time:
                     mock_time.time.side_effect = _make_time_side_effect(0.0, 0.1)
@@ -3679,7 +3808,11 @@ class TestVerifyOrderResult:
                 return True
             return False
 
-        with patch.object(bot, "_get_current_activity", return_value="SomeActivity"):
+        with patch.object(
+            bot,
+            "_get_current_app_info",
+            return_value={"package": "cn.damai", "activity": "SomeActivity"},
+        ):
             with patch.object(bot, "_has_element", side_effect=has_element_side_effect):
                 with patch("mobile.damai_app.time") as mock_time:
                     mock_time.time.side_effect = _make_time_side_effect(0.0, 0.1)
@@ -4959,6 +5092,49 @@ class TestWarmValidationPipeline:
             result = bot.run_ticket_grabbing(initial_page_probe=initial_probe)
 
         assert result is True
+        pipeline.assert_called_once()
+
+    def test_formal_run_uses_warm_pipeline_then_submits_once(self, bot):
+        """Formal mode may use cached coordinate path, but still checks attendees."""
+        bot.config.rush_mode = True
+        bot.config.if_commit_order = True
+        self._populate_coords(bot)
+        initial_probe = {"state": "detail_page", "purchase_button": True}
+
+        with patch.object(bot, "_run_warm_formal_pipeline", return_value=True) as pipeline:
+            with patch.object(
+                bot, "_ensure_attendees_selected_on_confirm_page", return_value=True
+            ) as ensure_attendees:
+                with patch.object(bot, "_submit_after_ready", return_value=True) as submit:
+                    with patch.object(bot, "dismiss_startup_popups") as popups:
+                        with patch.object(bot, "check_session_valid") as session:
+                            result = bot.run_ticket_grabbing(initial_page_probe=initial_probe)
+
+        assert result is True
+        pipeline.assert_called_once()
+        ensure_attendees.assert_called_once()
+        submit.assert_called_once()
+        popups.assert_not_called()
+        session.assert_not_called()
+
+    def test_formal_detail_page_uses_cold_pipeline_without_cached_probe(self, bot):
+        """A manually opened detail page activates formal fast path immediately."""
+        bot.config.rush_mode = True
+        bot.config.if_commit_order = True
+        detail_probe = {"state": "detail_page", "purchase_button": True}
+
+        with patch.object(bot, "probe_current_page", return_value=detail_probe):
+            with patch.object(bot, "_has_warm_pipeline_coords", return_value=False):
+                with patch.object(bot, "_using_u2", return_value=True):
+                    with patch.object(
+                        bot, "_run_cold_formal_pipeline", return_value=True
+                    ) as pipeline:
+                        with patch.object(
+                            bot, "_ensure_attendees_selected_on_confirm_page", return_value=True
+                        ):
+                            with patch.object(bot, "_submit_after_ready", return_value=True):
+                                assert bot.run_ticket_grabbing() is True
+
         pipeline.assert_called_once()
 
     def test_pipeline_fallback_on_missing_coords(self, bot):

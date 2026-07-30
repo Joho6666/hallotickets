@@ -167,7 +167,9 @@ class PageProbe:
         self._cached_result: Optional[Dict[str, Any]] = None
         self._cached_at: float = 0.0
         # P2 #24 — consecutive-unknown alerting
-        self._unknown_threshold = max(1, int(unknown_threshold))
+        # Zero explicitly disables unknown-page XML dumping for users who
+        # prefer not to persist screen hierarchy diagnostics.
+        self._unknown_threshold = max(0, int(unknown_threshold))
         self._consecutive_unknown_count = 0
         self._dump_dir = dump_dir
         self.dumped_xml_path: Optional[str] = None
@@ -246,7 +248,10 @@ class PageProbe:
             self._consecutive_unknown_count = 0
             return
         self._consecutive_unknown_count += 1
-        if self._consecutive_unknown_count == self._unknown_threshold:
+        if (
+            self._unknown_threshold
+            and self._consecutive_unknown_count == self._unknown_threshold
+        ):
             logger.warning(
                 "UNKNOWN_THRESHOLD reached after %d classifications",
                 self._consecutive_unknown_count,
@@ -454,21 +459,23 @@ class PageProbe:
     def _exists_by_resource_id(self, resource_id: str) -> bool:
         try:
             el = self._device(resourceId=resource_id)
-            return el.exists
+            # uiautomator2 may return an Exists proxy rather than bool.  Keep
+            # probe results JSON-safe for the dashboard and callers.
+            return bool(el.exists)
         except Exception:
             return False
 
     def _exists_by_text(self, text: str) -> bool:
         try:
             el = self._device(text=text)
-            return el.exists
+            return bool(el.exists)
         except Exception:
             return False
 
     def _exists_by_text_contains(self, text: str) -> bool:
         try:
             el = self._device(textContains=text)
-            return el.exists
+            return bool(el.exists)
         except Exception:
             return False
 

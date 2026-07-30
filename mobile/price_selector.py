@@ -251,6 +251,31 @@ class PriceSelector:
         except Exception:
             pass
 
+    def _prefer_cheapest_available(self) -> bool:
+        return getattr(self._config, "price_strategy", "exact") == "cheapest_available"
+
+    def _pick_cheapest_available_option(self, options):
+        available = [
+            option for option in options if self._bot._is_price_option_available(option)
+        ]
+        if not available:
+            return None
+
+        any_known_digits = any(
+            self._extract_price_digits(option.get("text") or "") is not None
+            for option in available
+        )
+
+        def _sort_key(option):
+            digits = self._extract_price_digits(option.get("text") or "")
+            index = option.get("index", 10**9)
+            if any_known_digits:
+                normalized_digits = digits if digits is not None else 10**9
+                return (normalized_digits, index)
+            return (index,)
+
+        return min(available, key=_sort_key)
+
     # ------------------------------------------------------------------
     # Migrated method bodies from DamaiBot
     # ------------------------------------------------------------------
@@ -395,8 +420,20 @@ class PriceSelector:
 
     def _is_price_option_available(self, option):
         """Return whether a visible price option is actually selectable."""
-        tag = (option.get("tag") or "").strip()
-        return tag not in _PRICE_UNAVAILABLE_TAGS
+        texts = []
+        for candidate in (
+            option.get("tag"),
+            option.get("text"),
+            *(option.get("raw_texts") or []),
+        ):
+            if isinstance(candidate, str) and candidate.strip():
+                texts.append(candidate.strip())
+
+        merged = " ".join(texts)
+        if not merged:
+            return True
+
+        return not any(marker in merged for marker in _PRICE_UNAVAILABLE_TAGS)
 
     def _click_visible_price_option(self, card_index):
         """Click a visible price card by its clickable-card index."""
@@ -530,7 +567,7 @@ class PriceSelector:
     def _select_price_option_fast(self, cached_coords=None):
         """Use config-driven, low-latency ticket selection before OCR-heavy fallbacks."""
         bot = self._bot
-        if self._config.rush_mode:
+        if self._config.rush_mode and not self._prefer_cheapest_available():
             _burst = self._config.if_commit_order
             if bot._click_price_option_by_config_index(
                 burst=_burst, coords=cached_coords
@@ -540,6 +577,21 @@ class PriceSelector:
         visible_options = bot.get_visible_price_options(allow_ocr=False)
 
         if visible_options:
+            if self._prefer_cheapest_available():
+                cheapest_option = self._pick_cheapest_available_option(visible_options)
+                if cheapest_option:
+                    if bot._click_visible_price_option(cheapest_option["index"]):
+                        logger.info(
+                            "按最低可售票档优先选择: %s (index=%s)"
+                            % (
+                                cheapest_option.get("text") or "(未识别)",
+                                cheapest_option["index"],
+                            )
+                        )
+                        return True
+                logger.warning("当前可见票档均不可选，最低票档优先策略未命中")
+                return False
+
             indexed_option = next(
                 (
                     option
@@ -603,6 +655,22 @@ class PriceSelector:
             return fast_result
 
         visible_options = bot.get_visible_price_options()
+        if self._prefer_cheapest_available():
+            cheapest_option = self._pick_cheapest_available_option(visible_options)
+            if cheapest_option:
+                if bot._click_visible_price_option(cheapest_option["index"]):
+                    logger.info(
+                        "按最低可售票档优先选择: %s (index=%s, source=%s)"
+                        % (
+                            cheapest_option.get("text") or "(未识别)",
+                            cheapest_option["index"],
+                            cheapest_option.get("source", "ui"),
+                        )
+                    )
+                    return True
+            logger.warning("最低票档优先策略下，当前页没有可点击票档")
+            return False
+
         matched_options = [
             option
             for option in visible_options
@@ -1009,8 +1077,6 @@ class PriceSelector:
             if not entry["text"] and index in ocr_results:
                 entry["text"] = ocr_results[index]
                 entry["source"] = "ocr"
-            if not entry["text"] and not entry["tag"]:
-                continue
             options.append(
                 {
                     "index": index,
@@ -1140,8 +1206,6 @@ class PriceSelector:
             if not entry["text"] and idx in ocr_results:
                 entry["text"] = ocr_results[idx]
                 entry["source"] = "ocr"
-            if not entry["text"] and not entry["tag"]:
-                continue
             options.append(
                 {
                     "index": idx,

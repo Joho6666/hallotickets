@@ -7,9 +7,15 @@
 
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
+
+
+pytestmark = pytest.mark.skipif(
+    sys.platform == "win32", reason="Bash argument tests require a Unix shell"
+)
 
 SCRIPT = (
     Path(__file__).resolve().parents[2] / "mobile" / "scripts" / "start_ticket_grabbing.sh"

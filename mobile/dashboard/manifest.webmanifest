@@ -1,0 +1,17 @@
+{
+  "name": "HalloTickets",
+  "short_name": "HalloTickets",
+  "description": "本地手机抢票控制台",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#cfccc4",
+  "theme_color": "#cfccc4",
+  "icons": [
+    {
+      "src": "/hallotickets-ticket.png",
+      "sizes": "354x354",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ]
+}

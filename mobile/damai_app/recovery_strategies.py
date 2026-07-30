@@ -348,8 +348,7 @@ class RecoveryStrategiesMixin:
             # U-10：提交后必须复用主路径同源的 verify_order_result 验证结果，
             # 禁止把「点击成功」直接当抢票成功虚报。
             logger.info("快速重试：确认页重新提交订单，提交后验证下单结果")
-            result = self._submit_order_fast(submit_selectors)
-            return self._finalize_submit_result(result)
+            return self._submit_after_ready(submit_selectors, time.time())
         elif state == "pending_order_dialog":
             return self._report_pending_order_dialog()
         else:

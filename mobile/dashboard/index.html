@@ -1,0 +1,467 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="theme-color" content="#cfccc4" />
+  <link rel="manifest" href="/manifest.webmanifest" />
+  <title>HalloTickets // Live Control</title>
+  <style>
+    :root {
+      --ink: #0d1117;
+      --ink-soft: #161b22;
+      --paper: #f6f8fa;
+      --paper-deep: #eaeef2;
+      --line: #30363d;
+      --line-dark: #d0d7de;
+      --signal: #e85d3f;
+      --signal-light: #e85d3f;
+      --mint: #3fb950;
+      --warn: #d29922;
+      --danger: #f85149;
+      --muted: #8b949e;
+      --display: "Bahnschrift", "Segoe UI Variable Display", "Microsoft YaHei UI", sans-serif;
+      --body: "Segoe UI Variable Text", "Microsoft YaHei UI", "PingFang SC", sans-serif;
+    }
+
+    * { box-sizing: border-box; }
+    html { background: var(--ink); }
+    body {
+      margin: 0;
+      min-width: 320px;
+      color: var(--paper);
+      font-family: var(--body);
+      background: var(--ink);
+    }
+    button, input, select, textarea { font: inherit; }
+    button { cursor: pointer; }
+
+    .shell { width: min(1440px, calc(100% - 40px)); margin: 0 auto; padding: 22px 0 36px; }
+    .masthead { display: grid; grid-template-columns: minmax(0, 1.2fr) auto; gap: 28px; align-items: end; padding: 0 0 18px; border-bottom: 1px solid var(--line); }
+    .eyebrow { margin: 0 0 7px; color: var(--muted); font-size: 12px; font-weight: 600; letter-spacing: .04em; }
+    h1, h2, p { margin-top: 0; }
+    h1 { margin-bottom: 7px; font-family: var(--display); font-size: clamp(31px, 4vw, 42px); font-weight: 650; line-height: 1; letter-spacing: -.035em; }
+    h1 span { color: var(--muted); font-family: var(--body); font-size: .36em; font-weight: 600; letter-spacing: .02em; vertical-align: baseline; }
+    .masthead-copy { max-width: 58ch; margin-bottom: 0; color: var(--muted); font-size: 13px; line-height: 1.65; }
+    .clock { min-width: 250px; padding: 10px 12px; text-align: right; border: 1px solid var(--line); border-radius: 7px; background: var(--ink-soft); }
+    .clock-label { color: var(--muted); font-size: 11px; letter-spacing: .04em; }
+    .countdown { margin-top: 5px; color: var(--paper); font-family: ui-monospace, "Cascadia Mono", monospace; font-size: clamp(22px, 3vw, 31px); font-weight: 700; letter-spacing: -.05em; }
+    .countdown.ready { color: var(--signal-light); }
+    .countdown.idle { color: var(--muted); font-size: 18px; letter-spacing: 0; }
+
+    .signal-rail { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; margin: 18px 0; }
+    .signal { min-height: 72px; padding: 13px 14px; border: 1px solid var(--line); border-radius: 7px; background: var(--ink-soft); display: flex; align-items: center; gap: 11px; }
+    .signal-label { color: var(--muted); font-size: 12px; }
+    .signal-state { margin-top: 3px; color: var(--paper); font-size: 14px; font-weight: 800; }
+    .light-dot { width: 10px; height: 10px; border-radius: 50%; background: #6e7681; flex: 0 0 auto; }
+    .light-dot.ok { background: var(--mint); } .light-dot.warn { background: var(--warn); } .light-dot.bad { background: var(--danger); }
+
+    .stage { display: grid; grid-template-columns: minmax(0, 1.08fr) minmax(360px, .92fr); gap: 16px; align-items: start; }
+    .left-stack, .right-stack { display: grid; gap: 18px; }
+    .panel { overflow: hidden; padding: 18px; border: 1px solid var(--line); border-radius: 8px; background: var(--ink-soft); }
+    .panel-head { position: relative; display: flex; justify-content: space-between; align-items: flex-start; gap: 14px; margin-bottom: 17px; }
+    .panel-title { margin: 0; font-family: var(--display); font-size: 19px; font-weight: 650; letter-spacing: -.02em; }
+    .panel-kicker { color: var(--muted); font-size: 11px; font-weight: 600; letter-spacing: .04em; }
+    .note, .action-message { color: var(--muted); font-size: 12px; line-height: 1.6; }
+    .status-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+    .stat { min-height: 112px; padding: 14px; border: 1px solid var(--line); border-radius: 6px; background: #111820; }
+    .label { color: var(--muted); font-size: 11px; letter-spacing: .09em; text-transform: uppercase; }
+    .value { margin-top: 10px; color: var(--paper); font-size: 20px; font-weight: 800; line-height: 1.2; overflow-wrap: anywhere; }
+    .sub { margin-top: 8px; color: var(--muted); font-size: 12px; line-height: 1.45; overflow-wrap: anywhere; }
+    .ok { color: var(--mint); } .warn { color: var(--warn); } .bad { color: var(--danger); }
+
+    .action-deck { border-color: #704033; background: #211714; }
+    .action-deck .panel-kicker { color: #dca08f; }
+    .action-deck .panel-title { color: #f3d7d0; }
+    .button-row { position: relative; display: flex; flex-wrap: wrap; gap: 9px; }
+    button { border: 1px solid #8b949e; border-radius: 5px; padding: 10px 14px; color: var(--paper); background: transparent; font-weight: 650; letter-spacing: .01em; transition: background .16s ease, border-color .16s ease; }
+    button:hover:not(:disabled) { border-color: var(--paper); background: rgba(246,248,250,.08); }
+    button:disabled { cursor: not-allowed; opacity: .5; }
+    .formal-submit { color: #fff; background: var(--signal); border-color: var(--signal); }
+    .formal-submit:hover:not(:disabled) { background: #f16b4f; border-color: #f16b4f; }
+    .stop-task { border-color: #a44b43; color: #f0b4ad; }
+
+    .screen-panel { padding: 0; background: #0d1117; }
+    .screen-top { display: flex; justify-content: space-between; align-items: center; gap: 15px; padding: 17px 19px; border-bottom: 1px solid var(--line); }
+    .screen-title { margin: 0; font-family: var(--display); font-size: 19px; font-weight: 650; }
+    .stream-note { color: var(--muted); font-size: 11px; text-align: right; }
+    .live-indicator { display: inline-flex; align-items: center; gap: 7px; color: var(--mint); font-size: 11px; font-weight: 650; }
+    .live-indicator::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
+    .screenshot-frame { position: relative; min-height: 570px; display: grid; place-items: center; padding: 14px; background: #05080c; }
+    .screenshot-frame::after { content: ""; position: absolute; inset: 14px; pointer-events: none; border: 1px solid rgba(255,255,255,.1); }
+    .screenshot-frame img { display: block; width: 100%; max-height: 700px; min-height: 360px; object-fit: contain; background: #080e14; }
+    .screenshot-frame img.frame-arrived { opacity: 1; }
+    .screen-caption { position: absolute; left: 25px; bottom: 25px; z-index: 1; padding: 6px 8px; color: var(--muted); background: rgba(13,17,23,.84); font-family: ui-monospace, "Cascadia Mono", monospace; font-size: 10px; }
+    .task-screen-state { position: absolute; z-index: 2; inset: 14px; display: grid; place-items: center; padding: 22px; background: #252826; color: #ece9df; text-align: center; }
+    .task-screen-state[hidden] { display: none; }
+    .task-screen-kicker { color: #a6a69d; font-size: 11px; font-weight: 700; letter-spacing: .12em; }
+    .task-screen-title { margin: 12px 0 4px; font-family: var(--display); font-size: clamp(27px, 4vw, 42px); font-weight: 800; letter-spacing: -.035em; }
+    .task-screen-percent { color: #d9a44b; font-family: ui-monospace, "Cascadia Mono", monospace; font-size: 21px; font-weight: 800; }
+    .task-screen-detail { max-width: 34ch; margin: 16px auto 0; color: #c4c3ba; font-size: 13px; line-height: 1.65; }
+    .task-screen-state.ok .task-screen-percent { color: #69bb8a; }
+    .task-screen-state.ok .task-screen-title { color: #e9f5e8; }
+    .task-screen-state.bad .task-screen-percent, .task-screen-state.bad .task-screen-title { color: #e6a39d; }
+
+    .config-panel { background: #f6f8fa; border-color: #f6f8fa; color: var(--ink); }
+    .config-panel .panel-title { color: var(--ink); }
+    .config-panel .note, .config-panel .action-message { color: #63707a; }
+    .target-form { position: relative; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+    .field { display: grid; gap: 6px; } .field.wide { grid-column: 1 / -1; }
+    .field.toggle-field { grid-template-columns: 1fr auto; align-items: center; padding: 10px; border: 1px solid var(--line-dark); border-radius: 5px; background: #fff; }
+    .field.toggle-field label { margin: 0; }
+    .field.toggle-field input { width: 18px; height: 18px; accent-color: var(--signal); }
+    .field label { color: #59636b; font-size: 11px; font-weight: 900; letter-spacing: .08em; }
+    input, select, textarea { min-width: 0; width: 100%; border: 1px solid var(--line-dark); border-radius: 5px; padding: 10px; color: var(--ink); background: #fff; outline: none; }
+    input:focus, select:focus, textarea:focus { border-color: var(--signal); box-shadow: 0 0 0 3px rgba(255,92,53,.17); }
+    textarea { min-height: 62px; resize: vertical; }
+    .config-panel button { color: var(--paper); background: var(--ink); }
+    .kv { position: relative; display: grid; }
+    .kv-row { display: grid; grid-template-columns: 118px minmax(0, 1fr); gap: 12px; padding: 10px 0; border-bottom: 1px solid var(--line); }
+    .kv-row:last-child { border-bottom: 0; }
+    .kv-key { color: var(--muted); font-size: 11px; font-weight: 800; letter-spacing: .08em; }
+    .kv-value { color: var(--paper); font-size: 13px; line-height: 1.55; overflow-wrap: anywhere; }
+    pre { max-height: 300px; margin: 0; padding: 15px; overflow: auto; color: #c9d1d9; background: #0d1117; border: 1px solid var(--line); border-radius: 5px; font: 12px/1.65 ui-monospace, "Cascadia Mono", monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
+    .refresh { color: var(--paper); background: #21262d; }
+    button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible { outline: 3px solid rgba(88,166,255,.65); outline-offset: 2px; }
+    @media (prefers-reduced-motion: reduce) { *, *::before, *::after { scroll-behavior: auto !important; transition: none !important; animation: none !important; } }
+    @media (max-width: 1000px) { .masthead, .stage { grid-template-columns: 1fr; } .clock { text-align: left; } .right-stack { grid-row: 1; } .screenshot-frame { min-height: 430px; } }
+    @media (max-width: 650px) { .shell { width: min(100% - 20px, 1480px); padding-top: 14px; } .signal-rail, .status-grid { grid-template-columns: 1fr 1fr; } .panel { padding: 16px; } .screen-panel { padding: 0; } .target-form { grid-template-columns: 1fr; } .field.wide { grid-column: auto; } .kv-row { grid-template-columns: 1fr; gap: 3px; } .screenshot-frame { min-height: 360px; padding: 11px; } }
+
+    /* Tactile retro terminal skin: physical surfaces, not floating glass cards. */
+    :root {
+      --ink: #242624;
+      --ink-soft: #d7d4cb;
+      --paper: #f4f1e8;
+      --paper-deep: #c6c3ba;
+      --line: #a19e95;
+      --line-dark: #aaa79f;
+      --signal: #2e8055;
+      --signal-light: #2e8055;
+      --mint: #2e8055;
+      --warn: #a56d1c;
+      --danger: #ae4d46;
+      --muted: #62635e;
+      --display: "Bahnschrift", "Segoe UI Variable Display", "Microsoft YaHei UI", sans-serif;
+    }
+    html { background: #bdbbb5; }
+    body {
+      color: var(--ink);
+      background:
+        linear-gradient(90deg, rgba(255,255,255,.24) 1px, transparent 1px),
+        linear-gradient(rgba(255,255,255,.22) 1px, transparent 1px),
+        #bdbbb5;
+      background-size: 5px 5px;
+    }
+    .shell {
+      width: min(1420px, calc(100% - 32px));
+      margin: 26px auto;
+      padding: 22px;
+      border: 5px solid #eeece5;
+      border-radius: 26px;
+      background: #cfccc4;
+      box-shadow: 0 2px 0 #8c8a83, 0 18px 38px rgba(41, 40, 36, .24), inset 0 0 0 2px #aaa79e;
+    }
+    .masthead {
+      min-height: 112px;
+      padding: 18px 20px;
+      border: 1px solid #aba8a0;
+      border-radius: 16px;
+      background: #e5e2da;
+      box-shadow: inset 2px 2px 5px rgba(71,70,65,.2), inset -2px -2px 5px rgba(255,255,255,.75);
+    }
+    .eyebrow { color: #6e6b64; font-size: 11px; font-weight: 700; letter-spacing: .12em; }
+    h1 { color: #1d1e1d; font-size: clamp(30px, 4vw, 43px); font-weight: 800; letter-spacing: -.025em; }
+    h1 span { color: #5e605b; font-size: .34em; font-weight: 600; }
+    .masthead-copy { color: #5c5d58; }
+    .clock {
+      min-width: 235px;
+      border: 1px solid #a4a199;
+      border-radius: 13px;
+      background: #cfcdc5;
+      box-shadow: inset 2px 2px 5px rgba(64,63,58,.2), inset -2px -2px 4px rgba(255,255,255,.68);
+    }
+    .clock-label { color: #666760; }
+    .countdown { color: #1d201e; }
+    .countdown.ready { color: #2e8055; }
+
+    .signal-rail { gap: 12px; }
+    .signal {
+      min-height: 76px;
+      border: 1px solid #aaa79e;
+      border-radius: 13px;
+      background: #dedbd3;
+      box-shadow: 2px 3px 5px rgba(71,70,65,.18), inset 1px 1px 2px rgba(255,255,255,.74), inset -2px -2px 4px rgba(83,82,77,.14);
+    }
+    .signal-label { color: #63645e; font-weight: 600; }
+    .signal-state { color: #272927; }
+    .light-dot { width: 12px; height: 12px; border: 2px solid rgba(32,34,32,.16); box-shadow: inset 1px 1px 2px rgba(0,0,0,.2); }
+    .light-dot.ok { background: #2e8055; box-shadow: 0 0 0 3px rgba(46,128,85,.14), inset 1px 1px 2px rgba(0,0,0,.22); }
+    .light-dot.warn { background: #a56d1c; box-shadow: 0 0 0 3px rgba(165,109,28,.12), inset 1px 1px 2px rgba(0,0,0,.22); }
+    .light-dot.bad { background: #ae4d46; box-shadow: 0 0 0 3px rgba(174,77,70,.12), inset 1px 1px 2px rgba(0,0,0,.22); }
+
+    .stage { gap: 16px; }
+    .left-stack, .right-stack { gap: 16px; }
+    .panel {
+      border: 1px solid #aaa79e;
+      border-radius: 16px;
+      color: #242624;
+      background: #dedbd3;
+      box-shadow: 2px 3px 6px rgba(61,60,56,.18), inset 1px 1px 2px rgba(255,255,255,.72), inset -2px -2px 4px rgba(80,79,74,.12);
+    }
+    .panel-title { color: #202220; font-size: 20px; font-weight: 750; }
+    .panel-kicker { color: #696a63; font-size: 10px; font-weight: 700; letter-spacing: .1em; }
+    .note, .action-message { color: #5d5f59; }
+    .status-grid { gap: 10px; }
+    .stat {
+      border: 1px solid #aaa79e;
+      border-radius: 10px;
+      background: #d0cdc5;
+      box-shadow: inset 2px 2px 4px rgba(72,71,66,.17), inset -1px -1px 3px rgba(255,255,255,.55);
+    }
+    .label { color: #6d6d67; }
+    .value { color: #252725; }
+    .sub { color: #61625d; }
+    .ok { color: #237048; } .warn { color: #945f12; } .bad { color: #9b3f39; }
+
+    .action-deck { border-color: #a4a198; background: #d8d5cc; }
+    .action-deck .panel-kicker { color: #65665f; }
+    .action-deck .panel-title { color: #202220; }
+    .action-deck .note, .action-deck .action-message { color: #5d5f59; }
+    .task-progress { margin-top: 15px; padding: 12px; border: 1px solid #b0ada5; border-radius: 9px; background: #cbc8bf; box-shadow: inset 1px 1px 2px rgba(255,255,255,.56); }
+    .task-progress[hidden] { display: none; }
+    .task-progress-head { display: flex; justify-content: space-between; gap: 12px; color: #30322f; font-size: 13px; font-weight: 750; }
+    .task-progress-percent { color: #5e605a; font-family: ui-monospace, "Cascadia Mono", monospace; }
+    .task-progress-track { height: 10px; margin: 9px 0 8px; overflow: hidden; border: 1px solid #96938b; border-radius: 99px; background: #bab7af; box-shadow: inset 1px 1px 3px rgba(68,67,62,.25); }
+    .task-progress-fill { width: 0; height: 100%; border-radius: inherit; background: #7c7d75; transition: width .22s ease; }
+    .task-progress-fill.ok { background: #2e8055; } .task-progress-fill.warn { background: #a56d1c; } .task-progress-fill.bad { background: #ae4d46; }
+    .task-progress-detail { color: #65665f; font-size: 11px; line-height: 1.45; overflow-wrap: anywhere; }
+    .button-row { align-items: center; }
+    button {
+      min-height: 41px;
+      border: 1px solid #949189;
+      border-radius: 9px;
+      color: #292b28;
+      background: #d7d4cb;
+      box-shadow: 1px 2px 3px rgba(68,67,62,.22), inset 1px 1px 2px rgba(255,255,255,.82), inset -1px -1px 2px rgba(76,75,70,.14);
+      font-weight: 700;
+    }
+    button:hover:not(:disabled) { border-color: #6b6962; background: #e6e3db; }
+    button:active:not(:disabled) { transform: translateY(1px); box-shadow: inset 2px 2px 4px rgba(68,67,62,.22); }
+    .formal-submit { color: #f3f6f2; background: #2e8055; border-color: #286c49; box-shadow: 1px 2px 3px rgba(45,75,57,.28), inset 1px 1px 2px rgba(255,255,255,.2); }
+    .formal-submit:hover:not(:disabled) { background: #378e60; border-color: #286c49; }
+    .stop-task { color: #913f39; border-color: #b98a84; }
+
+    .screen-panel { border: 4px solid #bbb8af; padding: 8px; background: #c8c5bc; box-shadow: inset 2px 2px 5px rgba(66,65,61,.24), inset -2px -2px 4px rgba(255,255,255,.66); }
+    .screen-top { margin: 0; padding: 13px 14px; border: 1px solid #9e9b93; border-radius: 9px 9px 0 0; background: #dcd9d0; }
+    .screen-title { color: #202220; font-size: 19px; }
+    .stream-note { color: #60615c; }
+    .live-indicator { color: #2e8055; }
+    .live-indicator::before { width: 8px; height: 8px; border: 1px solid rgba(0,0,0,.15); }
+    .screenshot-frame { min-height: 565px; padding: 18px; border: 1px solid #8c8a82; border-top: 0; border-radius: 0 0 9px 9px; background: #252826; box-shadow: inset 2px 2px 7px rgba(0,0,0,.55), inset -1px -1px 3px rgba(255,255,255,.14); }
+    .screenshot-frame::after { inset: 16px; border: 1px solid rgba(242,239,229,.22); }
+    .screenshot-frame img { border-radius: 6px; background: #0a0c0b; box-shadow: 0 1px 8px rgba(0,0,0,.45); }
+    .screen-caption { left: 32px; bottom: 30px; color: #e5e2d8; border: 1px solid rgba(242,239,229,.18); border-radius: 3px; background: rgba(27,29,27,.86); }
+
+    .config-panel { border-color: #aaa79e; background: #e1ded6; }
+    .config-panel .panel-title { color: #202220; }
+    .config-panel .note, .config-panel .action-message { color: #5d5f59; }
+    .field label { color: #5c5d58; }
+    .field.toggle-field { border-color: #aaa79e; border-radius: 7px; background: #f7f5ee; box-shadow: inset 1px 1px 2px rgba(67,66,61,.12); }
+    input, select, textarea { border-color: #aaa79e; border-radius: 7px; background: #f7f5ee; box-shadow: inset 1px 1px 2px rgba(67,66,61,.12); }
+    input:focus, select:focus, textarea:focus { border-color: #2e8055; box-shadow: 0 0 0 3px rgba(46,128,85,.17); }
+    .config-panel button { color: #f3f6f2; background: #2e8055; border-color: #286c49; }
+    .kv-row { border-bottom-color: #b4b1a9; }
+    .kv-key { color: #6c6d67; }
+    .kv-value { color: #2a2c29; }
+    pre { border-color: #8f8d85; border-radius: 8px; color: #dfe6dc; background: #242725; }
+    .refresh { color: #292b28; background: #d7d4cb; }
+    .environment-panel { background: #dedbd3; }
+    .environment-list { display: grid; gap: 8px; }
+    .environment-item { display: grid; grid-template-columns: 10px minmax(0, 1fr); gap: 10px; align-items: start; padding: 10px; border: 1px solid #b0ada5; border-radius: 8px; background: #d0cdc5; box-shadow: inset 1px 1px 2px rgba(255,255,255,.56); }
+    .environment-state { width: 10px; height: 10px; margin-top: 4px; border-radius: 50%; background: #85857e; box-shadow: inset 1px 1px 2px rgba(0,0,0,.2); }
+    .environment-state.ready { background: #2e8055; }
+    .environment-state.action { background: #a56d1c; }
+    .environment-state.missing { background: #ae4d46; }
+    .environment-name { color: #292b28; font-size: 13px; font-weight: 750; }
+    .environment-detail { margin-top: 3px; color: #60615c; font-size: 12px; line-height: 1.45; }
+    .environment-setup { white-space: nowrap; }
+    .desktop-actions { display: flex; justify-content: flex-end; flex-wrap: wrap; gap: 7px; margin-top: 9px; }
+    .desktop-actions button { padding: 7px 9px; font-size: 11px; }
+    .desktop-install-message { min-height: 17px; margin-top: 7px; color: #62635e; font-size: 10px; line-height: 1.45; }
+    button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible { outline-color: rgba(46,128,85,.72); }
+    @media (max-width: 650px) {
+      .shell { width: min(100% - 16px, 1420px); margin: 8px auto; padding: 12px; border-radius: 18px; }
+      .masthead { padding: 15px; }
+      .clock { min-width: 0; }
+      .signal-rail { gap: 8px; }
+    }
+  </style>
+</head>
+<body>
+  <main class="shell">
+    <header class="masthead page-enter">
+      <div>
+        <p class="eyebrow">本地抢票控制台</p>
+        <h1>HalloTickets <span>状态看板</span></h1>
+        <p class="masthead-copy">查看设备状态、抢票目标和任务结果。正式运行期间，手机连接会由脚本独占。</p>
+      </div>
+      <div class="clock">
+        <div class="clock-label">开售倒计时</div>
+        <div class="countdown idle" id="countdown">未设置开售时间</div>
+        <div class="desktop-actions"><button id="pwaInstallBtn" type="button">安装浏览器应用</button><button id="desktopShortcutBtn" type="button">创建桌面图标</button></div>
+        <div class="desktop-install-message" id="desktopInstallMessage">可安装为独立窗口，或创建一键启动图标。</div>
+      </div>
+    </header>
+
+    <section class="signal-rail page-enter delay-1" aria-label="系统状态">
+      <div class="signal"><span class="light-dot" id="deviceLight"></span><div><div class="signal-label">设备连接</div><div class="signal-state" id="deviceRail">检测中</div></div></div>
+      <div class="signal"><span class="light-dot" id="modeLight"></span><div><div class="signal-label">运行模式</div><div class="signal-state" id="modeRail">检测中</div></div></div>
+      <div class="signal"><span class="light-dot" id="preflightLight"></span><div><div class="signal-label">开抢预热</div><div class="signal-state" id="preflightRail">等待检查</div></div></div>
+      <div class="signal"><span class="light-dot" id="runLight"></span><div><div class="signal-label">任务状态</div><div class="signal-state" id="runRail">待命</div></div></div>
+    </section>
+
+    <div class="stage">
+      <section class="left-stack">
+        <section class="panel page-enter delay-1">
+          <div class="panel-head"><div><div class="panel-kicker">运行状态</div><h2 class="panel-title">当前状态</h2></div><div class="note">更新 <span id="refreshedAt">—</span></div></div>
+          <div class="status-grid">
+            <div class="stat"><div class="label">手机连接</div><div class="value" id="deviceState">—</div><div class="sub" id="deviceMeta">—</div></div>
+            <div class="stat"><div class="label">当前页面</div><div class="value" id="pageState">—</div><div class="sub" id="pageMeta">—</div></div>
+            <div class="stat"><div class="label">任务最终结果</div><div class="value" id="runOutcome">—</div><div class="sub" id="runMeta">—</div></div>
+            <div class="stat"><div class="label">最后日志</div><div class="value" id="lastLog">—</div></div>
+          </div>
+        </section>
+
+        <section class="panel action-deck page-enter delay-2">
+          <div class="panel-head"><div><div class="panel-kicker">任务执行</div><h2 class="panel-title">正式控制台</h2><div class="note">运行后看板会暂停页面探测与画面流，让手机资源优先留给抢票流程。</div></div><div class="button-row"><button id="preflightBtn" type="button">预热检查</button><button id="stopTaskBtn" class="stop-task" type="button" hidden>停止任务</button><button id="formalSubmitBtn" class="formal-submit" type="button">正式提交</button></div></div>
+          <div class="action-message" id="actionMessage">正在检查运行条件…</div>
+          <div class="action-message" id="preflightMessage">尚未执行预热检查。</div>
+          <div class="task-progress" id="taskProgress" hidden>
+            <div class="task-progress-head"><span id="taskProgressLabel">任务准备中</span><span class="task-progress-percent" id="taskProgressPercent">0%</span></div>
+            <div class="task-progress-track" role="progressbar" id="taskProgressBar" aria-label="任务进度" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><div class="task-progress-fill" id="taskProgressFill"></div></div>
+            <div class="task-progress-detail" id="taskProgressDetail">等待任务启动。</div>
+          </div>
+        </section>
+
+        <section class="panel config-panel page-enter delay-3">
+          <div class="panel-head"><div><div class="panel-kicker">可编辑设置</div><h2 class="panel-title">抢票目标</h2><div class="note">停止任务后修改；保存后下次运行立即使用。</div></div><button id="saveTargetBtn" type="button">保存目标</button></div>
+          <form class="target-form" id="targetForm">
+            <div class="field wide"><label for="keywordInput">搜索关键词</label><input id="keywordInput" required /></div>
+            <div class="field wide"><label for="targetTitleInput">精确演出标题（可选，用于避免同名误匹配）</label><input id="targetTitleInput" /></div>
+            <div class="field wide"><label for="targetVenueInput">精确场馆（可选）</label><input id="targetVenueInput" /></div>
+            <div class="field"><label for="cityInput">城市</label><input id="cityInput" required /></div>
+            <div class="field"><label for="dateInput">场次日期</label><input id="dateInput" required /></div>
+            <div class="field"><label for="sellStartInput">开售时间（北京时间）</label><input id="sellStartInput" type="datetime-local" /></div>
+            <div class="field toggle-field"><label for="autoNavigateInput">自动从首页搜索并导航</label><input id="autoNavigateInput" type="checkbox" /></div>
+            <div class="field wide"><label for="usersInput">观演人（每行一位）</label><textarea id="usersInput" required></textarea></div>
+            <div class="field"><label for="priceInput">优先票档</label><input id="priceInput" required /></div>
+            <div class="field"><label for="priceIndexInput">票档兜底序号</label><input id="priceIndexInput" type="number" min="0" step="1" required /></div>
+            <div class="field wide"><label for="priceStrategyInput">票档策略</label><select id="priceStrategyInput"><option value="cheapest_available">有票中优先便宜</option><option value="exact">只买指定票档</option></select></div>
+          </form>
+          <div class="action-message" id="targetMessage">目标设置加载中…</div>
+        </section>
+
+        <section class="panel page-enter delay-3"><div class="panel-head"><div><div class="panel-kicker">当前配置</div><h2 class="panel-title">抢票计划</h2></div><div class="note">设备 <span id="selectedSerial">—</span></div></div><div class="kv" id="targetConfig"></div></section>
+        <section class="panel page-enter delay-3"><div class="panel-head"><div><div class="panel-kicker">运行日志</div><h2 class="panel-title">最近记录</h2></div><button id="refreshBtn" class="refresh" type="button">立即刷新</button></div><pre id="logs">加载中…</pre></section>
+      </section>
+
+      <aside class="right-stack">
+        <section class="panel screen-panel page-enter delay-2">
+          <div class="screen-top"><div><div class="panel-kicker">手机镜像</div><h2 class="screen-title">当前画面</h2></div><div class="stream-note"><span class="live-indicator">实时画面</span><br /><span id="screenRefreshNote">准备中…</span></div></div>
+          <div class="screenshot-frame"><img id="phoneShot" alt="手机实时画面" /><div class="task-screen-state" id="taskScreenState" hidden><div><div class="task-screen-kicker" id="taskScreenKicker">任务执行中</div><div class="task-screen-title" id="taskScreenTitle">正在启动任务</div><div class="task-screen-percent" id="taskScreenPercent">0%</div><div class="task-screen-detail" id="taskScreenDetail">手机已由任务独占，镜像将在任务结束后恢复。</div></div></div><div class="screen-caption">手机画面 · 帧 <span id="screenFrame">—</span></div></div>
+        </section>
+        <section class="panel page-enter delay-3"><div class="panel-head"><div><div class="panel-kicker">前台应用</div><h2 class="panel-title">设备信息</h2></div></div><div class="kv" id="focusInfo"></div></section>
+        <section class="panel environment-panel page-enter delay-3">
+          <div class="panel-head"><div><div class="panel-kicker">环境配置</div><h2 class="panel-title">运行环境</h2><div class="note">一键安装电脑端 Platform Tools、Poetry 与项目依赖；手机设置仍需在真机上完成。</div></div><button id="environmentSetupBtn" class="environment-setup" type="button">一键配置</button></div>
+          <div class="action-message" id="environmentMessage">正在检查环境…</div>
+          <div class="environment-list" id="environmentList"></div>
+        </section>
+      </aside>
+    </div>
+  </main>
+
+  <script>
+    const stateEls = Object.fromEntries([
+      "refreshedAt", "selectedSerial", "deviceState", "deviceMeta", "pageState", "pageMeta", "runOutcome", "runMeta", "lastLog", "targetConfig", "focusInfo", "logs", "phoneShot", "screenRefreshNote", "screenFrame", "refreshBtn", "formalSubmitBtn", "preflightBtn", "stopTaskBtn", "actionMessage", "preflightMessage", "taskProgress", "taskProgressLabel", "taskProgressPercent", "taskProgressBar", "taskProgressFill", "taskProgressDetail", "taskScreenState", "taskScreenKicker", "taskScreenTitle", "taskScreenPercent", "taskScreenDetail", "targetForm", "saveTargetBtn", "targetMessage", "keywordInput", "targetTitleInput", "targetVenueInput", "cityInput", "dateInput", "sellStartInput", "autoNavigateInput", "usersInput", "priceInput", "priceIndexInput", "priceStrategyInput", "deviceLight", "modeLight", "runLight", "preflightLight", "deviceRail", "modeRail", "preflightRail", "runRail", "countdown", "environmentSetupBtn", "environmentMessage", "environmentList", "pwaInstallBtn", "desktopShortcutBtn", "desktopInstallMessage"
+    ].map((id) => [id, document.getElementById(id)]));
+    const STATUS_INTERVAL_MS = 2500;
+    const SCREEN_INTERVAL_MS = 250;
+    let latestStatus = null;
+    let targetFormDirty = false;
+    let statusInFlight = false;
+    let screenshotInFlight = false;
+    let latestFrameId = "";
+    let activeScreenshotUrl = "";
+    let lastLogs = "";
+    let environmentInFlight = false;
+    let terminalScreenSignature = "";
+    let terminalScreenUntil = 0;
+    let taskWasRunning = false;
+    let deferredInstallPrompt = null;
+
+    function fmtValue(value) { if (value === null || value === undefined || value === "") return "—"; if (Array.isArray(value)) return value.join("、"); if (typeof value === "boolean") return value ? "是" : "否"; if (typeof value === "object") return JSON.stringify(value); return String(value); }
+    function statusClass(text) { const value = String(text || ""); if (/(device|成功|ready|validation_ready|probe_ready|order_confirm_page|detail_page)/i.test(value)) return "ok"; if (/(unknown|warning|pending|session_picker|sku_page|识别中|media_player_overlay)/i.test(value)) return "warn"; if (/(error|failed|failure|sold_out|断开|未连接|config_or_device_error)/i.test(value)) return "bad"; return ""; }
+    function setValue(el, value, cls = "") { const next = fmtValue(value); if (el.textContent !== next) el.textContent = next; el.className = cls ? `value ${cls}` : "value"; }
+    function setText(el, value) { const next = fmtValue(value); if (el.textContent !== next) el.textContent = next; }
+    function setLight(el, cls) { el.className = `light-dot ${cls || ""}`; }
+    function renderKv(container, rows) { const html = rows.map(([key, value]) => `<div class="kv-row"><div class="kv-key">${key}</div><div class="kv-value">${fmtValue(value)}</div></div>`).join(""); if (container.dataset.rendered !== html) { container.innerHTML = html; container.dataset.rendered = html; } }
+    function populateTargetForm(config) { if (targetFormDirty) return; stateEls.keywordInput.value = config.keyword || ""; stateEls.targetTitleInput.value = config.target_title || ""; stateEls.targetVenueInput.value = config.target_venue || ""; stateEls.cityInput.value = config.city || ""; stateEls.dateInput.value = config.date || ""; stateEls.sellStartInput.value = config.sell_start_time ? String(config.sell_start_time).slice(0, 16) : ""; stateEls.autoNavigateInput.checked = config.auto_navigate === true; stateEls.usersInput.value = Array.isArray(config.users) ? config.users.join("\n") : ""; stateEls.priceInput.value = config.price || ""; stateEls.priceIndexInput.value = Number.isInteger(config.price_index) ? config.price_index : 0; stateEls.priceStrategyInput.value = config.price_strategy || "cheapest_available"; }
+    function updateCountdown() { const raw = latestStatus?.config?.effective?.sell_start_time; if (!raw) { stateEls.countdown.textContent = "未设置开售时间"; stateEls.countdown.className = "countdown idle"; return; } const remaining = new Date(raw).getTime() - Date.now(); if (Number.isNaN(remaining)) { stateEls.countdown.textContent = "时间格式异常"; stateEls.countdown.className = "countdown idle"; return; } if (remaining <= 0) { stateEls.countdown.textContent = "开售时间已到"; stateEls.countdown.className = "countdown ready"; return; } const seconds = Math.floor(remaining / 1000); const hours = String(Math.floor(seconds / 3600)).padStart(2, "0"); const minutes = String(Math.floor((seconds % 3600) / 60)).padStart(2, "0"); const secs = String(seconds % 60).padStart(2, "0"); stateEls.countdown.textContent = `${hours}:${minutes}:${secs}`; stateEls.countdown.className = "countdown"; }
+    function renderEnvironment(items) { const list = document.createDocumentFragment(); for (const item of items || []) { const row = document.createElement("div"); row.className = "environment-item"; const light = document.createElement("span"); light.className = `environment-state ${item.state || ""}`; const copy = document.createElement("div"); const name = document.createElement("div"); name.className = "environment-name"; name.textContent = item.label || "环境项"; const detail = document.createElement("div"); detail.className = "environment-detail"; detail.textContent = item.detail || "—"; copy.append(name, detail); row.append(light, copy); list.append(row); } stateEls.environmentList.replaceChildren(list); }
+    function renderTaskProgress(progress) { const data = progress || {}; const percent = Math.max(0, Math.min(100, Number(data.percent) || 0)); const visible = Boolean(data.active || (data.label && data.label !== "尚无结果")); stateEls.taskProgress.hidden = !visible; if (!visible) return; setText(stateEls.taskProgressLabel, data.label || "任务准备中"); setText(stateEls.taskProgressPercent, `${percent}%`); setText(stateEls.taskProgressDetail, data.detail || "正在等待下一步。" ); stateEls.taskProgressFill.style.width = `${percent}%`; stateEls.taskProgressFill.className = `task-progress-fill ${data.tone || ""}`; stateEls.taskProgressBar.setAttribute("aria-valuenow", String(percent)); }
+    function showTaskScreen(kicker, title, percent, detail, tone = "warn") { stateEls.taskScreenState.hidden = false; stateEls.taskScreenState.className = `task-screen-state ${tone}`; setText(stateEls.taskScreenKicker, kicker); setText(stateEls.taskScreenTitle, title); setText(stateEls.taskScreenPercent, `${percent}%`); setText(stateEls.taskScreenDetail, detail); }
+    function renderTaskScreen(runtime, progress, result) { if (runtime.running) { taskWasRunning = true; terminalScreenSignature = ""; terminalScreenUntil = 0; const step = progress || {}; const percent = Math.max(0, Math.min(100, Number(step.percent) || 0)); showTaskScreen("任务执行中 · 手机独占", step.label || "正在启动任务", percent, step.detail || "手机已由任务独占，镜像将在任务结束后恢复。", step.tone || "warn"); setText(stateEls.screenRefreshNote, `当前步骤：${step.label || "正在启动任务"} · ${percent}%`); return; } const signature = `${result.label || ""}|${result.detail || ""}`; if (taskWasRunning && result.tone && result.label !== "尚无结果" && terminalScreenSignature !== signature) { taskWasRunning = false; terminalScreenSignature = signature; terminalScreenUntil = Date.now() + 4500; showTaskScreen(result.tone === "ok" ? "任务完成 · 请在手机处理支付" : "任务结束", result.label, 100, result.detail || "任务已结束，正在恢复手机画面。", result.tone); setTimeout(refreshScreenshot, 180); return; } if (Date.now() < terminalScreenUntil) return; stateEls.taskScreenState.hidden = true; }
+    async function loadEnvironment() { if (environmentInFlight || document.hidden) return; environmentInFlight = true; try { const res = await fetch("/api/environment"); if (!res.ok) throw new Error(await res.text()); const data = await res.json(); renderEnvironment(data.items); const setup = data.setup || {}; setText(stateEls.environmentMessage, data.task_locked ? data.message : (setup.message || data.message || "环境检查完成。")); stateEls.environmentSetupBtn.disabled = Boolean(data.task_locked || setup.running); stateEls.environmentSetupBtn.textContent = setup.running ? "配置中…" : "一键配置"; } catch (error) { setText(stateEls.environmentMessage, `环境检查失败：${error.message || error}`); } finally { environmentInFlight = false; } }
+
+    async function loadStatus() {
+      if (statusInFlight || document.hidden) return;
+      statusInFlight = true;
+      try {
+        const res = await fetch(`/api/status?t=${Date.now()}`); if (!res.ok) throw new Error(await res.text());
+        const data = await res.json(); latestStatus = data;
+        setText(stateEls.refreshedAt, new Date(data.refreshed_at).toLocaleTimeString()); setText(stateEls.selectedSerial, data.selected_serial);
+        const runtime = data.runtime || {}; const selectedDevice = data.selected_device; const deviceState = selectedDevice ? selectedDevice.state : "未连接"; const taskOwnsDevice = deviceState === "task_controlled"; const deviceReady = selectedDevice?.state === "device" || taskOwnsDevice;
+        setValue(stateEls.deviceState, taskOwnsDevice ? "任务独占" : deviceState, taskOwnsDevice ? "warn" : statusClass(deviceState)); setText(stateEls.deviceRail, taskOwnsDevice ? "脚本独占" : (deviceReady ? "已连接" : "未连接")); setLight(stateEls.deviceLight, taskOwnsDevice ? "warn" : (deviceReady ? "ok" : "bad"));
+        setText(stateEls.deviceMeta, selectedDevice ? `${fmtValue(selectedDevice.model)} / ${fmtValue(selectedDevice.serial)}` : data.device_error || "还没有检测到目标设备");
+        const pageProbe = data.page_probe || {}; const pageState = pageProbe.result ? pageProbe.result.state : (pageProbe.pending ? "页面识别中" : (pageProbe.suspended ? "任务运行中" : (pageProbe.error || "未识别")));
+        setValue(stateEls.pageState, pageState, statusClass(pageState)); setText(stateEls.pageMeta, pageProbe.result ? `购票按钮: ${fmtValue(pageProbe.result.purchase_button)}，票档区: ${fmtValue(pageProbe.result.price_container)}` : pageProbe.message || data.focus?.line || data.device_error || "暂无");
+        const runResult = data.run_result || {}; setValue(stateEls.runOutcome, runResult.label || "尚无结果", runResult.tone || ""); setText(stateEls.runMeta, runResult.detail || "还没有运行摘要");
+        setText(stateEls.lastLog, data.last_log || "暂无日志"); const logs = (data.logs || []).join("\n") || "暂无日志"; if (logs !== lastLogs) { stateEls.logs.textContent = logs; lastLogs = logs; }
+        const config = data.config?.effective || data.config?.raw || {}; const formalReady = config.probe_only === false && config.if_commit_order === true; setLight(stateEls.modeLight, formalReady ? "ok" : "warn"); setText(stateEls.modeRail, formalReady ? "正式提交" : "探测 / 验证");
+        renderKv(stateEls.targetConfig, [["关键词", config.keyword], ["精确标题", config.target_title], ["场馆", config.target_venue], ["城市 / 日期", `${fmtValue(config.city)} / ${fmtValue(config.date)}`], ["观演人", config.users], ["目标票档", config.price], ["策略", config.price_strategy], ["开售时间", config.sell_start_time], ["自动导航", config.auto_navigate], ["提交订单", config.if_commit_order]]); populateTargetForm(config);
+        const focus = data.focus || {}; renderKv(stateEls.focusInfo, [["前台应用", focus.package], ["前台页面", focus.activity], ["焦点原文", focus.line], ["设备序列号", data.selected_serial]]);
+        const preflight = data.preflight || {}; setLight(stateEls.runLight, runtime.running ? "warn" : (runtime.last_error ? "bad" : "ok")); setLight(stateEls.preflightLight, preflight.ready ? "ok" : (preflight.checked_at ? "bad" : "warn")); setText(stateEls.runRail, runtime.running ? "运行中" : "待命"); setText(stateEls.preflightRail, preflight.ready ? "已就绪" : "待检查"); setText(stateEls.preflightMessage, preflight.message || "尚未执行预热检查。");
+        renderTaskProgress(data.task_progress); renderTaskScreen(runtime, data.task_progress, runResult);
+        stateEls.formalSubmitBtn.disabled = !deviceReady || !formalReady || runtime.running; stateEls.preflightBtn.disabled = !deviceReady || !formalReady || runtime.running; stateEls.stopTaskBtn.hidden = !runtime.running; stateEls.stopTaskBtn.disabled = !runtime.running; stateEls.saveTargetBtn.disabled = runtime.running; Array.from(stateEls.targetForm.elements).forEach((element) => { element.disabled = runtime.running; });
+        setText(stateEls.actionMessage, runtime.running ? `正式任务运行中（进程 ${runtime.pid || "-"}）。手机由脚本独占；看板不再发起任何 ADB 监控或截图请求。` : (!deviceReady ? "手机未连接，正式提交已锁定。" : (!formalReady ? "当前不是正式提交配置。" : "条件已就绪。正式提交会按当前配置执行。")));
+        updateCountdown();
+      } catch (error) { setText(stateEls.actionMessage, `看板状态暂不可用：${error.message || error}`); } finally { statusInFlight = false; }
+    }
+    async function refreshScreenshot() {
+      if (document.hidden || latestStatus?.runtime?.running || screenshotInFlight) return;
+      screenshotInFlight = true;
+      try {
+        const res = await fetch(`/api/screenshot?after=${encodeURIComponent(latestFrameId)}&t=${Date.now()}`);
+        if (res.status === 204) return; if (res.status === 202) { setText(stateEls.screenRefreshNote, "正在建立第一帧…"); return; } if (!res.ok) throw new Error(await res.text());
+        const frameId = res.headers.get("X-HaTickets-Frame-Id") || ""; if (!frameId || frameId === latestFrameId) return;
+        const nextUrl = URL.createObjectURL(await res.blob()); const oldUrl = activeScreenshotUrl; stateEls.phoneShot.onload = () => { if (oldUrl) URL.revokeObjectURL(oldUrl); stateEls.phoneShot.classList.remove("frame-arrived"); void stateEls.phoneShot.offsetWidth; stateEls.phoneShot.classList.add("frame-arrived"); };
+        stateEls.phoneShot.src = nextUrl; activeScreenshotUrl = nextUrl; latestFrameId = frameId; setText(stateEls.screenFrame, frameId); setText(stateEls.screenRefreshNote, `帧 #${frameId} · ${new Date().toLocaleTimeString()}`);
+      } catch (error) { setText(stateEls.screenRefreshNote, `画面暂不可用：${error.message || error}`); } finally { screenshotInFlight = false; }
+    }
+    stateEls.refreshBtn.addEventListener("click", async () => { await loadStatus(); await refreshScreenshot(); });
+    stateEls.formalSubmitBtn.addEventListener("click", async () => { if (!window.confirm("确定开始正式提交吗？脚本可能将订单带到支付页面。")) return; taskWasRunning = true; stateEls.formalSubmitBtn.disabled = true; setText(stateEls.actionMessage, "正在启动正式任务…"); try { const res = await fetch("/api/run/formal-submit", { method: "POST" }); const payload = await res.json(); setText(stateEls.actionMessage, payload.message || "启动结果未知。"); } catch (error) { taskWasRunning = false; setText(stateEls.actionMessage, `启动失败：${error}`); } await loadStatus(); });
+    stateEls.preflightBtn.addEventListener("click", async () => { stateEls.preflightBtn.disabled = true; setText(stateEls.preflightMessage, "正在建立手机会话并识别页面…"); try { const res = await fetch("/api/preflight", { method: "POST" }); const payload = await res.json(); setText(stateEls.preflightMessage, payload.message || "预热检查结果未知。"); } catch (error) { setText(stateEls.preflightMessage, `预热检查失败：${error}`); } await loadStatus(); });
+    stateEls.stopTaskBtn.addEventListener("click", async () => { if (!window.confirm("确定停止电脑端任务吗？若已进入支付或已占单，请在手机 App 检查订单。")) return; stateEls.stopTaskBtn.disabled = true; try { const res = await fetch("/api/run/stop", { method: "POST" }); const payload = await res.json(); setText(stateEls.actionMessage, payload.message || "停止结果未知。"); } catch (error) { setText(stateEls.actionMessage, `停止失败：${error}`); } await loadStatus(); });
+    stateEls.targetForm.addEventListener("input", () => { targetFormDirty = true; });
+    stateEls.saveTargetBtn.addEventListener("click", async () => { if (!stateEls.targetForm.reportValidity()) return; const localSaleTime = stateEls.sellStartInput.value; const payload = { keyword: stateEls.keywordInput.value.trim(), target_title: stateEls.targetTitleInput.value.trim() || null, target_venue: stateEls.targetVenueInput.value.trim() || null, city: stateEls.cityInput.value.trim(), date: stateEls.dateInput.value.trim(), sell_start_time: localSaleTime ? `${localSaleTime}:00+08:00` : null, auto_navigate: stateEls.autoNavigateInput.checked, users: stateEls.usersInput.value.split("\n").map((name) => name.trim()).filter(Boolean), price: stateEls.priceInput.value.trim(), price_index: Number(stateEls.priceIndexInput.value), price_strategy: stateEls.priceStrategyInput.value }; stateEls.saveTargetBtn.disabled = true; setText(stateEls.targetMessage, "正在保存目标…"); try { const res = await fetch("/api/config/target", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) }); const result = await res.json(); setText(stateEls.targetMessage, result.message || "保存结果未知。"); if (result.ok) targetFormDirty = false; } catch (error) { setText(stateEls.targetMessage, `保存失败：${error}`); } await loadStatus(); });
+    stateEls.environmentSetupBtn.addEventListener("click", async () => { if (!window.confirm("将真实安装缺少的 Android Platform Tools、Poetry 和项目依赖，并启动 ADB。不会修改手机开发者设置，是否继续？")) return; stateEls.environmentSetupBtn.disabled = true; setText(stateEls.environmentMessage, "正在启动环境配置…"); try { const res = await fetch("/api/environment/setup", { method: "POST" }); const data = await res.json(); setText(stateEls.environmentMessage, data.message || "配置已开始。"); } catch (error) { setText(stateEls.environmentMessage, `无法启动配置：${error}`); } await loadEnvironment(); });
+    window.addEventListener("beforeinstallprompt", (event) => { event.preventDefault(); deferredInstallPrompt = event; stateEls.pwaInstallBtn.disabled = false; setText(stateEls.desktopInstallMessage, "浏览器应用已准备好安装。也可以创建桌面一键启动图标。"); });
+    window.addEventListener("appinstalled", () => { deferredInstallPrompt = null; stateEls.pwaInstallBtn.disabled = true; setText(stateEls.desktopInstallMessage, "HalloTickets 浏览器应用已安装。"); });
+    stateEls.pwaInstallBtn.addEventListener("click", async () => { if (!deferredInstallPrompt) { setText(stateEls.desktopInstallMessage, "当前浏览器未显示安装提示；可使用浏览器菜单“安装应用”，或直接创建桌面图标。"); return; } deferredInstallPrompt.prompt(); const choice = await deferredInstallPrompt.userChoice; if (choice.outcome === "accepted") setText(stateEls.desktopInstallMessage, "正在安装浏览器应用…"); deferredInstallPrompt = null; });
+    stateEls.desktopShortcutBtn.addEventListener("click", async () => { stateEls.desktopShortcutBtn.disabled = true; setText(stateEls.desktopInstallMessage, "正在创建桌面图标…"); try { const res = await fetch("/api/desktop/install", { method: "POST" }); const data = await res.json(); setText(stateEls.desktopInstallMessage, data.message || "桌面图标创建完成。"); } catch (error) { setText(stateEls.desktopInstallMessage, `创建桌面图标失败：${error}`); } finally { stateEls.desktopShortcutBtn.disabled = false; } });
+    if ("serviceWorker" in navigator) navigator.serviceWorker.register("/service-worker.js").catch(() => { setText(stateEls.desktopInstallMessage, "浏览器应用服务未启用；桌面图标仍可正常使用。"); });
+    document.addEventListener("visibilitychange", () => { if (!document.hidden) { loadStatus(); refreshScreenshot(); loadEnvironment(); } });
+    loadStatus(); refreshScreenshot(); loadEnvironment(); setInterval(loadStatus, STATUS_INTERVAL_MS); setInterval(refreshScreenshot, SCREEN_INTERVAL_MS); setInterval(loadEnvironment, 15000); setInterval(updateCountdown, 1000);
+  </script>
+</body>
+</html>

@@ -70,6 +70,10 @@ class DamaiBot(
         self.wait = None
         self._terminal_failure_reason = None
         self._last_run_outcome = None
+        # A disconnect after tapping submit is ambiguous.  Reconnect to verify
+        # the resulting state, but never tap submit again automatically.
+        self._submit_action_started = False
+        self._disconnect_recovery_attempts = 0
         # U-12：本次 run_with_retry 的总执行轮次（外层尝试与快速重试各 +1），
         # 供运行摘要 attempts 字段消费；纯整数自增，零热路径开销。
         self._attempts_made = 0
@@ -83,31 +87,7 @@ class DamaiBot(
         if setup_driver:
             self._setup_driver()
 
-        # Sub-modules that work with any backend (Appium or u2)
-        _device = self.d or self.driver
-        self._attendee_sel = AttendeeSelector(_device, self.config)
-        self._attendee_sel.set_bot(self)
-        self._price_sel = PriceSelector(_device, self.config, probe=None)
-        self._price_sel.set_bot(self)
-        self._navigator = EventNavigator(_device, self.config, probe=None)
-        self._navigator.set_bot(self)
-
-        # Sub-modules for u2-optimized operations
-        if self.d is not None:
-            self._page_probe = PageProbe(self.d, self.config)
-            self._page_probe.set_bot(self)
-            self._guard = BuyButtonGuard(self.d)
-            self._pipeline = FastPipeline(
-                self.d, self.config, self._page_probe, self._guard
-            )
-            self._pipeline.set_bot(self)
-            # Share coordinate cache with pipeline
-            self._pipeline._cached_coords = self._cached_hot_path_coords
-            self._pipeline._cached_no_match = self._cached_hot_path_no_match
-            # Update sub-modules with real probe now that it exists
-            self._navigator._probe = self._page_probe
-            self._recovery = RecoveryHelper(self.d, self._page_probe, self._navigator)
-            self._price_sel._probe = self._page_probe
+        self._bind_runtime_modules()
 
         if setup_driver:
             self._emit_boot_snapshot()
@@ -215,6 +195,31 @@ class DamaiBot(
             )
         return True
 
+    def _confirm_theme_dialog_if_present(self):
+        """Best-effort click-through for Damai's generic theme dialog.
+
+        Some event flows show a "温馨提示 / 确认并知悉" modal before exposing
+        actual purchasable SKUs. Treat it as a gating notice, not as a terminal
+        pending-order state.
+        """
+        selectors = (
+            (By.ID, "cn.damai:id/damai_theme_dialog_confirm_btn"),
+            (
+                ANDROID_UIAUTOMATOR,
+                'new UiSelector().textMatches(".*确认并知悉.*|.*确认.*|.*我知道了.*")',
+            ),
+        )
+        for by, value in selectors:
+            try:
+                if self.ultra_fast_click(by, value, timeout=0.4):
+                    logger.info("检测到规则提示弹窗，已自动确认继续")
+                    time.sleep(0.2)
+                    self._page_probe.force_state("detail_page")
+                    return True
+            except Exception:
+                continue
+        return False
+
     def _execution_mode_key(self):
         """Return the current execution mode key."""
         if self.config.probe_only:
@@ -295,6 +300,50 @@ class DamaiBot(
         )
         return False
 
+    def _get_current_app_info(self):
+        """Return foreground app info as package/activity pair."""
+        try:
+            if self._using_u2():
+                info = self.d.app_current() or {}
+                return {
+                    "package": info.get("package", "") or "",
+                    "activity": info.get("activity", "") or "",
+                }
+        except Exception:
+            pass
+        try:
+            return {
+                "package": "",
+                "activity": getattr(self.driver, "current_activity", "") or "",
+            }
+        except Exception:
+            return {"package": "", "activity": ""}
+
+    def _is_payment_app_context(self, app_info):
+        """True when foreground app/activity clearly indicates cashier flow."""
+        package = (app_info or {}).get("package", "") or ""
+        activity = (app_info or {}).get("activity", "") or ""
+        haystack = f"{package} {activity}".lower()
+        indicators = (
+            "alipayclient",
+            "cashier",
+            "pay",
+            "mspcontaineractivity",
+            "flybirdwindowactivity",
+            "com.eg.android.alipaygphone",
+        )
+        return any(token in haystack for token in indicators)
+
+    def _is_confirm_page_still_visible(self):
+        """True when submit controls still show we are on confirm-purchase page."""
+        return self._has_element(
+            ANDROID_UIAUTOMATOR,
+            'new UiSelector().text("立即提交")',
+        ) or self._has_element(
+            ANDROID_UIAUTOMATOR,
+            'new UiSelector().textContains("确认购买")',
+        )
+
     @contextmanager
     def _timed_step(self, step_name, manual_baseline_seconds=None):
         """Record and log per-step latency for discovery hot path."""
@@ -329,7 +378,34 @@ class DamaiBot(
         """Pre-flight config checks before creating the driver session."""
         pass
 
-    def _setup_driver(self):
+    def _bind_runtime_modules(self):
+        """Bind page helpers to the current driver session.
+
+        uiautomator2 creates a new device object after a reconnect, so every
+        helper must be rebound instead of retaining the stale HTTP session.
+        """
+        device = self.d or self.driver
+        self._attendee_sel = AttendeeSelector(device, self.config)
+        self._attendee_sel.set_bot(self)
+        self._price_sel = PriceSelector(device, self.config, probe=None)
+        self._price_sel.set_bot(self)
+        self._navigator = EventNavigator(device, self.config, probe=None)
+        self._navigator.set_bot(self)
+
+        if self.d is None:
+            return
+        self._page_probe = PageProbe(self.d, self.config)
+        self._page_probe.set_bot(self)
+        self._guard = BuyButtonGuard(self.d)
+        self._pipeline = FastPipeline(self.d, self.config, self._page_probe, self._guard)
+        self._pipeline.set_bot(self)
+        self._pipeline._cached_coords = self._cached_hot_path_coords
+        self._pipeline._cached_no_match = self._cached_hot_path_no_match
+        self._navigator._probe = self._page_probe
+        self._recovery = RecoveryHelper(self.d, self._page_probe, self._navigator)
+        self._price_sel._probe = self._page_probe
+
+    def _setup_driver(self, preserve_foreground=False):
         """初始化 uiautomator2 直连驱动。"""
         import uiautomator2 as u2
 
@@ -341,7 +417,7 @@ class DamaiBot(
         except Exception:
             # 测试桩或精简驱动对象可能不支持 dict-style settings
             pass
-        should_start_app = True
+        should_start_app = not preserve_foreground
         try:
             current_app = self.d.app_current()
             if (
@@ -360,6 +436,60 @@ class DamaiBot(
             )
         self.driver = self.d
         self.wait = None
+
+    @staticmethod
+    def _is_u2_disconnect_error(error):
+        """Identify the transient uiautomator2 HTTP disconnect seen on devices."""
+        error_type = type(error).__name__.lower()
+        message = str(error).lower()
+        return (
+            "remotedisconnected" in error_type
+            or "remote disconnected" in message
+            or "remotedisconnected" in message
+        )
+
+    def _reconnect_u2_fast(self):
+        """Reconnect in sub-second backoff while preserving the phone's page."""
+        if not self._using_u2():
+            return False
+        for delay_s in (0.10, 0.35):
+            self._disconnect_recovery_attempts += 1
+            logger.warning(
+                "检测到 uiautomator2 连接中断，%.0fms 后快速重连（第 %d 次）",
+                delay_s * 1000,
+                self._disconnect_recovery_attempts,
+            )
+            try:
+                if self.driver:
+                    self.driver.quit()
+            except Exception:
+                pass
+            time.sleep(delay_s)
+            try:
+                self._setup_driver(preserve_foreground=True)
+                self._bind_runtime_modules()
+                logger.info("真机连接已恢复，继续当前页面流程")
+                return True
+            except Exception as reconnect_error:
+                logger.warning("快速重连未成功: %s", reconnect_error)
+        return False
+
+    def _resume_after_disconnect(self, start_time):
+        """Resume safely after reconnect, avoiding a second submit tap."""
+        if not self._reconnect_u2_fast():
+            return False
+        if self._submit_action_started:
+            logger.warning("提交动作期间断线，已重连；仅验证订单状态，不会重复提交")
+            result = self.verify_order_result(timeout=4)
+            return self._finalize_submit_result(result, start_time=start_time)
+        return self.run_ticket_grabbing()
+
+    def _submit_after_ready(self, submit_selectors, start_time):
+        """Submit once and leave an ambiguity marker if transport drops mid-submit."""
+        self._submit_action_started = True
+        result = self._submit_order_fast(submit_selectors)
+        self._submit_action_started = False
+        return self._finalize_submit_result(result, start_time=start_time)
 
     # Core element operations, click operations, element inspection, and selector
     # utilities are inherited from UIPrimitives (mobile/ui_primitives.py).
@@ -631,13 +761,18 @@ class DamaiBot(
             'new UiSelector().textContains("确认支付")',
             'new UiSelector().textContains("支付剩余时间")',
             'new UiSelector().textContains("收银台")',
+            'new UiSelector().textContains("选择支付方式")',
+            'new UiSelector().textContains("请输入支付密码")',
+            'new UiSelector().textContains("支付密码")',
+            'new UiSelector().textContains("确认付款")',
         ]
 
         while time.time() - start < timeout:
-            activity = self._get_current_activity()
+            app_info = self._get_current_app_info()
+            activity = app_info.get("activity", "")
 
             # Success: payment page
-            if any(kw in activity for kw in ("Pay", "Cashier", "AlipayClient")):
+            if self._is_payment_app_context(app_info):
                 logger.info("订单提交成功，已跳转支付页面")
                 return "success"
 
@@ -671,15 +806,7 @@ class DamaiBot(
                 self._has_element(ANDROID_UIAUTOMATOR, selector)
                 for selector in payment_text_selectors
             ):
-                submit_still_visible = self._has_element(
-                    ANDROID_UIAUTOMATOR,
-                    'new UiSelector().text("立即提交")',
-                )
-                confirm_title_visible = self._has_element(
-                    ANDROID_UIAUTOMATOR,
-                    'new UiSelector().textContains("确认购买")',
-                )
-                if submit_still_visible or confirm_title_visible:
+                if self._is_confirm_page_still_visible():
                     logger.warning(
                         "检测到支付相关文本，但仍在确认购买页，暂不判定提交成功"
                     )
@@ -750,26 +877,44 @@ class DamaiBot(
             self._last_run_outcome = None
             self._log_execution_mode()
             page_probe = initial_page_probe or self.probe_current_page(fast=True)
-            fast_validation_hot_path = (
+            fast_detail_hot_path = (
                 self.config.rush_mode
-                and not self.config.if_commit_order
-                and initial_page_probe is not None
                 and page_probe["state"] in {"detail_page", "sku_page"}
             )
-            if fast_validation_hot_path:
-                logger.info(
-                    "开发验证极速路径：跳过启动弹窗与登录探测，直接执行抢票热路径"
-                )
+            if fast_detail_hot_path:
+                path_name = "正式提交" if self.config.if_commit_order else "开发验证"
+                logger.info("%s极速路径：跳过导航与全量页面扫描", path_name)
                 if page_probe["state"] == "detail_page":
                     if self._has_warm_pipeline_coords():
-                        # Warm pipeline: blind shell clicks + concurrent polling.
-                        pipeline_result = self._run_warm_validation_pipeline(start_time)
+                        pipeline_result = (
+                            self._run_warm_formal_pipeline(start_time)
+                            if self.config.if_commit_order
+                            else self._run_warm_validation_pipeline(start_time)
+                        )
                     elif self._using_u2():
-                        # Cold pipeline: XML dump → shell batch → concurrent polling.
-                        pipeline_result = self._run_cold_validation_pipeline(start_time)
+                        pipeline_result = (
+                            self._run_cold_formal_pipeline(start_time)
+                            if self.config.if_commit_order
+                            else self._run_cold_validation_pipeline(start_time)
+                        )
                     else:
                         pipeline_result = None
                     if pipeline_result is True:
+                        if self.config.if_commit_order:
+                            if not self._ensure_attendees_selected_on_confirm_page():
+                                self._set_terminal_failure("attendee_unselected")
+                                logger.error("极速正式路径观演人未选择完整，停止提交")
+                                return False
+                            submit_selectors = [
+                                (ANDROID_UIAUTOMATOR, 'new UiSelector().text("立即提交")'),
+                                (
+                                    ANDROID_UIAUTOMATOR,
+                                    'new UiSelector().textMatches(".*提交.*|.*确认.*")',
+                                ),
+                                (By.XPATH, '//*[contains(@text,"提交")]'),
+                            ]
+                            logger.info("极速正式路径：提交订单...")
+                            return self._submit_after_ready(submit_selectors, start_time)
                         return True
                     if pipeline_result is False:
                         return False
@@ -784,11 +929,44 @@ class DamaiBot(
                     return False
 
             if page_probe["state"] == "pending_order_dialog":
-                return self._report_pending_order_dialog()
+                if self._confirm_theme_dialog_if_present():
+                    page_probe = self.probe_current_page()
+                else:
+                    return self._report_pending_order_dialog()
+
+            if page_probe["state"] == "order_confirm_page":
+                if not self._ensure_attendees_selected_on_confirm_page(
+                    require_attendee_section=self.config.rush_mode
+                    and not self.config.if_commit_order
+                ):
+                    self._set_terminal_failure("attendee_unselected")
+                    logger.error("订单确认页观演人未选择完整，已停止自动提交")
+                    return False
+                if not self.config.if_commit_order:
+                    self._set_run_outcome("validation_ready")
+                    end_time = time.time()
+                    logger.info(
+                        "已在订单确认页完成观演人勾选，停止在“立即提交”前"
+                    )
+                    logger.info(
+                        f"开发验证成功：已到订单确认页，未提交订单，耗时: {end_time - start_time:.2f}秒"
+                    )
+                    return True
+                logger.info("当前已在订单确认页，直接进入正式提交热路径")
+                submit_selectors = [
+                    (ANDROID_UIAUTOMATOR, 'new UiSelector().text("立即提交")'),
+                    (
+                        ANDROID_UIAUTOMATOR,
+                        'new UiSelector().textMatches(".*提交.*|.*确认.*")',
+                    ),
+                    (By.XPATH, '//*[contains(@text,"提交")]'),
+                ]
+                return self._submit_after_ready(submit_selectors, start_time)
 
             if page_probe["state"] not in {
                 "detail_page",
                 "sku_page",
+                "order_confirm_page",
                 PageState.SESSION_PICKER.value,
             } or (
                 self.item_detail and not self._current_page_matches_target(page_probe)
@@ -799,7 +977,10 @@ class DamaiBot(
                         return False
                     page_probe = self.probe_current_page()
                     if page_probe["state"] == "pending_order_dialog":
-                        return self._report_pending_order_dialog()
+                        if self._confirm_theme_dialog_if_present():
+                            page_probe = self.probe_current_page()
+                        else:
+                            return self._report_pending_order_dialog()
                 else:
                     logger.warning("当前不在演出详情页，请先手动打开目标演出详情页")
                     return False
@@ -1094,10 +1275,12 @@ class DamaiBot(
 
             # 7. 提交订单
             logger.info("提交订单...")
-            result = self._submit_order_fast(submit_selectors)
-            return self._finalize_submit_result(result, start_time=start_time)
+            return self._submit_after_ready(submit_selectors, start_time)
 
         except Exception as e:
+            if self._is_u2_disconnect_error(e):
+                logger.warning("抢票流程遇到真机连接中断: %s", e)
+                return self._resume_after_disconnect(start_time)
             logger.error(f"抢票过程发生错误: {e}")
             try:
                 from .recovery_strategies import capture_failure_artifacts
@@ -1112,6 +1295,8 @@ class DamaiBot(
     def run_with_retry(self, max_retries=3, initial_page_probe=None):
         """带重试机制的抢票"""
         self._attempts_made = 0
+        self._disconnect_recovery_attempts = 0
+        self._submit_action_started = False
         for attempt in range(max_retries):
             self._attempts_made += 1
             logger.info(f"第 {attempt + 1} 次尝试（{self._execution_mode_label()}）...")
@@ -1136,7 +1321,15 @@ class DamaiBot(
                 )
                 if fast_attempt > 0 and self.config.fast_retry_interval_ms > 0:
                     time.sleep(self.config.fast_retry_interval_ms / 1000)
-                if self._fast_retry_from_current_state():
+                try:
+                    fast_retry_success = self._fast_retry_from_current_state()
+                except Exception as exc:
+                    if self._is_u2_disconnect_error(exc):
+                        logger.warning("快速重试遇到真机连接中断: %s", exc)
+                        fast_retry_success = self._resume_after_disconnect(time.time())
+                    else:
+                        raise
+                if fast_retry_success:
                     self._log_success_outcome("快速重试成功：")
                     return True
                 if self._terminal_failure_reason:

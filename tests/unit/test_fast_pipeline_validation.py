@@ -276,6 +276,17 @@ class TestRunWarmValidation:
         bot._set_run_outcome.assert_called_once_with("validation_ready")
         bot._click_coordinates.assert_called()
 
+    def test_formal_pipeline_stops_at_confirm_without_validation_outcome(self):
+        fp, bot, device = _make_warm_pipeline()
+
+        with patch.object(
+            fp, "_wait_for_purchase_entry", return_value={"state": "order_confirm_page"}
+        ):
+            result = fp.run_warm_validation(start_time=time.time(), finalize=False)
+
+        assert result is True
+        bot._set_run_outcome.assert_not_called()
+
     def test_returns_none_when_entry_probe_fails(self):
         fp, bot, device = _make_warm_pipeline()
 

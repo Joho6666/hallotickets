@@ -65,6 +65,7 @@ KNOWN_CONFIG_KEYS = frozenset(
         "date",
         "price",
         "price_index",
+        "price_strategy",
         "if_commit_order",
         "probe_only",
         "auto_navigate",
@@ -657,6 +658,7 @@ class Config:
         price,
         price_index,
         if_commit_order,
+        price_strategy="exact",
         probe_only=False,
         app_package="cn.damai",
         app_activity=".launcher.splash.SplashMainActivity",
@@ -691,6 +693,12 @@ class Config:
             or price_index < 0
         ):
             raise ValueError(f"price_index 必须是非负整数，实际值: {price_index!r}")
+
+        if price_strategy not in {"exact", "cheapest_available"}:
+            raise ValueError(
+                "price_strategy 仅支持 'exact' 或 'cheapest_available'，"
+                f"实际值: {price_strategy!r}"
+            )
 
         if keyword is None or not isinstance(keyword, str) or len(keyword.strip()) == 0:
             raise ValueError(f"keyword 不能为空，必须是非空字符串，实际值: {keyword!r}")
@@ -800,6 +808,7 @@ class Config:
         self.date = date
         self.price = price
         self.price_index = price_index
+        self.price_strategy = price_strategy
         self.if_commit_order = if_commit_order
         self.probe_only = probe_only
         self.app_package = app_package
@@ -857,6 +866,7 @@ class Config:
             "date": self.date,
             "price": self.price,
             "price_index": self.price_index,
+            "price_strategy": self.price_strategy,
             "if_commit_order": self.if_commit_order,
             "probe_only": self.probe_only,
             "auto_navigate": self.auto_navigate,
@@ -918,6 +928,7 @@ class Config:
             date=config["date"],
             price=config["price"],
             price_index=config["price_index"],
+            price_strategy=config.get("price_strategy", "exact"),
             if_commit_order=config["if_commit_order"],
             probe_only=config.get("probe_only", False),
             app_package=config.get("app_package", "cn.damai"),

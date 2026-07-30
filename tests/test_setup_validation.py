@@ -28,7 +28,7 @@ class TestInfrastructureSetup:
         assert pyproject_path.exists(), "pyproject.toml should exist"
 
         # Read and validate content
-        content = pyproject_path.read_text()
+        content = pyproject_path.read_text(encoding="utf-8")
         assert "[tool.poetry]" in content, "Poetry configuration should be present"
         assert "[tool.pytest.ini_options]" in content, (
             "Pytest configuration should be present"
@@ -41,7 +41,7 @@ class TestInfrastructureSetup:
         assert conftest_path.exists(), "tests/conftest.py should exist"
 
         # Verify it contains fixture definitions
-        content = conftest_path.read_text()
+        content = conftest_path.read_text(encoding="utf-8")
         assert "@pytest.fixture" in content, "conftest.py should contain fixtures"
 
     def test_packages_importable(self):
@@ -135,7 +135,7 @@ class TestCoverageConfiguration:
     def test_coverage_configured(self):
         """Test that coverage is properly configured in pyproject.toml."""
         pyproject_path = Path("pyproject.toml")
-        content = pyproject_path.read_text()
+        content = pyproject_path.read_text(encoding="utf-8")
 
         # Check coverage settings
         assert "--cov=mobile" in content

@@ -87,6 +87,22 @@ class TestFastProbe:
         for key in _DEFAULT_RESULT:
             assert key in result
 
+    def test_element_exists_proxy_is_converted_to_plain_boolean(self):
+        """Dashboard responses must never contain a uiautomator Exists proxy."""
+        device = _make_device("com.damai.ProjectDetailActivity")
+
+        class ExistsProxy:
+            def __bool__(self):
+                return True
+
+        element = Mock()
+        element.exists = ExistsProxy()
+        device.return_value = element
+        result = PageProbe(device, cache_ttl_s=0).probe_current_page(fast=False)
+
+        assert result["purchase_button"] is True
+        assert type(result["purchase_button"]) is bool
+
 
 # ---------------------------------------------------------------------------
 # TTL cache tests
@@ -589,7 +605,7 @@ class TestUnknownThreshold:
         assert probe.dumped_xml_path is not None
         assert os.path.exists(probe.dumped_xml_path)
 
-    def test_unknown_threshold_clamps_to_min_one(self, tmp_path):
+    def test_unknown_threshold_zero_disables_xml_dumping(self, tmp_path):
         device = _make_device(activity="")
         device.dump_hierarchy.return_value = "<hierarchy/>"
         probe = PageProbe(
@@ -598,9 +614,9 @@ class TestUnknownThreshold:
             unknown_threshold=0,
             dump_dir=str(tmp_path),
         )
-        # threshold=0 is clamped to 1 → first unknown triggers immediately.
+        # threshold=0 explicitly disables diagnostic hierarchy dumping.
         probe.probe_current_page()
-        assert probe.dumped_xml_path is not None
+        assert probe.dumped_xml_path is None
 
 
 class TestForceState:
@@ -662,26 +678,13 @@ class TestForceState:
 # ---------------------------------------------------------------------------
 
 
-import pytest  # noqa: E402
-
-
 class TestUnknownThresholdZeroBoundary:
     """W3-03 qa-added 边界用例：把 unknown_threshold=0 的语义 lock-in。"""
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason=(
-            "qa intent: unknown_threshold=0 应禁用告警 (never dump)。"
-            "当前实现在 mobile/page_probe.py PageProbe.__init__ 内做 max(1, ...) "
-            "夹紧，第一次 unknown 即触发 dump — 行为与名字相反。"
-            "本测试 xfail 等待源码语义澄清/修复后转为 pass；"
-            "见 tests/manual/W3_regression_summary.md 'New issues' 区。"
-        ),
-    )
     def test_unknown_threshold_zero_disables_alert(self, tmp_path):
         """传 unknown_threshold=0 时，无论多少次 unknown 都不应触发告警/dump。
 
-        当前实现：clamp 到 1 → 第一次 unknown 即 dump，本测试 xfail。
+        0 表示关闭未知页诊断导出。
         """
         device = _make_device(activity="")
         device.dump_hierarchy.return_value = "<hierarchy/>"

@@ -251,6 +251,10 @@ class DelegatorsMixin:
         self._ensure_pipeline()
         return self._pipeline.run_cold_validation(start_time)
 
+    def _run_cold_formal_pipeline(self, start_time):
+        self._ensure_pipeline()
+        return self._pipeline.run_cold_validation(start_time, finalize=False)
+
     def _cold_pipeline_finish_confirm(self, start_time):
         self._ensure_pipeline()
         return self._pipeline._finish_confirm(start_time)
@@ -258,6 +262,10 @@ class DelegatorsMixin:
     def _run_warm_validation_pipeline(self, start_time):
         self._ensure_pipeline()
         return self._pipeline.run_warm_validation(start_time)
+
+    def _run_warm_formal_pipeline(self, start_time):
+        self._ensure_pipeline()
+        return self._pipeline.run_warm_validation(start_time, finalize=False)
 
     def _rush_preselect_and_buy_via_xml(self):
         self._ensure_pipeline()
