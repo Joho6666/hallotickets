@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="docs/images/hallotickets-app-icon.png" alt="HalloTickets 应用图标" width="120" />
+</p>
+
 # HalloTickets - 大麦抢票自动化
 
 > **HalloTickets** 是本地控制台与用户界面的新名称；为兼容既有配置、脚本与自动化环境，内部目录及 `HATICKETS_*` 环境变量仍保持不变。
