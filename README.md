@@ -17,6 +17,17 @@ Release 中的 `HalloTickets-Windows-Desktop-*.zip` 是完整的 Windows 启动�
 
 桌面图标只是本地启动器，仍需要连接已登录大麦 App 的 Android 真机。它不会保存账号 Cookie，也不会绕过验证码、风控或支付确认。
 
+## 界面预览
+
+<p align="center">
+  <img src="docs/images/dashboard-overview.png" alt="HalloTickets 状态看板总览" width="49%" />
+  <img src="docs/images/target-and-environment.png" alt="抢票目标与运行环境" width="49%" />
+</p>
+<p align="center">
+  <img src="docs/images/task-progress.png" alt="任务进度与当前操作步骤" width="49%" />
+  <img src="docs/images/environment-checklist.png" alt="运行环境检查清单" width="49%" />
+</p>
+
 ## 目录
 
 - [适用人群与准入门槛](#适用人群与准入门槛)
