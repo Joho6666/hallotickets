@@ -879,6 +879,7 @@ class DamaiBot(
             page_probe = initial_page_probe or self.probe_current_page(fast=True)
             fast_detail_hot_path = (
                 self.config.rush_mode
+                and not self.config.probe_only
                 and page_probe["state"] in {"detail_page", "sku_page"}
             )
             if fast_detail_hot_path:

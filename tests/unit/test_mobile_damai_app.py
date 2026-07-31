@@ -852,6 +852,30 @@ class TestRunTicketGrabbing:
         assert result is True
         smart_click.assert_not_called()
 
+    def test_probe_mode_never_invokes_fast_click_pipeline(self, bot):
+        """Rush mode must not let a probe enter the purchase-click pipeline."""
+        bot.config.probe_only = True
+        bot.config.rush_mode = True
+        detail_probe = {
+            "state": "detail_page",
+            "purchase_button": True,
+            "price_container": True,
+            "quantity_picker": False,
+            "submit_button": False,
+            "reservation_mode": False,
+        }
+
+        with patch.object(bot, "dismiss_startup_popups"):
+            with patch.object(bot, "check_session_valid", return_value=True):
+                with patch.object(
+                    bot, "_run_cold_validation_pipeline"
+                ) as click_pipeline:
+                    with patch("mobile.damai_app.time") as mock_time:
+                        mock_time.time.side_effect = _make_time_side_effect(0.0, 0.1)
+                        assert bot.run_ticket_grabbing(initial_page_probe=detail_probe) is True
+
+        click_pipeline.assert_not_called()
+
     def test_run_ticket_grabbing_logs_probe_mode_clearly(self, bot, caplog):
         """The first runtime log should clearly state this is only a probe."""
         bot.config.probe_only = True
