@@ -33,17 +33,20 @@ def _status(*, formal=True, connected=True):
     }
 
 
-def test_formal_submit_controller_starts_one_local_process():
+def test_formal_submit_controller_starts_one_local_process_after_preflight():
     controller = RunController()
     process = Mock()
     process.poll.return_value = None
     process.pid = 12345
 
-    with patch("mobile.status_dashboard.subprocess.Popen", return_value=process) as popen:
-        started, message = controller.start_formal_submit(_status())
+    with patch("mobile.status_dashboard.PREFLIGHT_CONTROLLER.snapshot", return_value={"ready": True}):
+        with patch("mobile.status_dashboard.update_runtime_mode") as set_runtime_mode:
+            with patch("mobile.status_dashboard.subprocess.Popen", return_value=process) as popen:
+                started, message = controller.start_formal_submit(_status(formal=False))
 
     assert started is True
     assert "已启动" in message
+    set_runtime_mode.assert_called_once_with(False, True, str(DEFAULT_CONFIG_PATH))
     command = popen.call_args.args[0]
     assert command[:3] == [__import__("sys").executable, "-m", "mobile.damai_app"]
     environment = popen.call_args.kwargs["env"]
@@ -52,11 +55,13 @@ def test_formal_submit_controller_starts_one_local_process():
     assert controller.snapshot()["running"] is True
 
 
-def test_formal_submit_controller_refuses_non_formal_or_disconnected_runs():
+def test_formal_submit_controller_refuses_missing_preflight_or_disconnected_runs():
     controller = RunController()
     with patch("mobile.status_dashboard.subprocess.Popen") as popen:
-        assert controller.start_formal_submit(_status(formal=False))[0] is False
-        assert controller.start_formal_submit(_status(connected=False))[0] is False
+        with patch("mobile.status_dashboard.PREFLIGHT_CONTROLLER.snapshot", return_value={"ready": False}):
+            assert controller.start_formal_submit(_status())[0] is False
+        with patch("mobile.status_dashboard.PREFLIGHT_CONTROLLER.snapshot", return_value={"ready": True}):
+            assert controller.start_formal_submit(_status(connected=False))[0] is False
 
     popen.assert_not_called()
 
@@ -130,6 +135,18 @@ def test_preflight_marks_detail_page_ready_without_clicking_purchase():
     assert "预热完成" in message
     assert controller.snapshot()["page_state"] == "detail_page"
     probe.assert_called_once_with("serial-1")
+
+
+def test_preflight_allows_safe_probe_configuration():
+    controller = PreflightController()
+    with patch("mobile.status_dashboard.RUN_CONTROLLER.snapshot", return_value={"running": False}):
+        with patch(
+            "mobile.status_dashboard._probe_page_state",
+            return_value={"available": True, "result": {"state": "detail_page"}},
+        ):
+            ready, _ = controller.run(_status(formal=False))
+
+    assert ready is True
 
 
 def test_preflight_rejects_wrong_page_and_running_task():

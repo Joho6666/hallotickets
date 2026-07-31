@@ -46,6 +46,7 @@ from mobile.config import (
     filter_known_config_keys,
     load_config_dict,
     update_config_values,
+    update_runtime_mode,
 )
 from mobile.page_probe import PageProbe
 
@@ -98,17 +99,23 @@ class RunController:
             }
 
     def start_formal_submit(self, status: dict[str, Any]) -> tuple[bool, str]:
-        """Start exactly one formal run, without mutating the saved config."""
-        config = ((status.get("config") or {}).get("effective") or {})
-        if config.get("probe_only") or not config.get("if_commit_order"):
-            return False, "当前配置不是正式提交模式，请先确认 probe_only=false 且 if_commit_order=true。"
+        """Start one confirmed formal run after the dashboard preflight succeeds."""
         device = status.get("selected_device") or {}
         if device.get("state") != "device":
             return False, "目标手机未处于可用连接状态，未启动。"
+        if not PREFLIGHT_CONTROLLER.snapshot().get("ready"):
+            return False, "请先完成预热检查，确认手机已停在目标详情页或票档页。"
 
         with self._lock:
             if self._process is not None and self._process.poll() is None:
                 return False, "已有正式提交任务正在运行，请勿重复启动。"
+            try:
+                # The only route that enables a real submission is the dashboard's
+                # explicit confirmation action. Preflight itself remains read-only.
+                update_runtime_mode(False, True, str(DEFAULT_CONFIG_PATH))
+            except (ConfigError, OSError, ValueError) as exc:
+                self._last_error = str(exc)
+                return False, f"无法切换到正式提交模式: {exc}"
             environment = os.environ.copy()
             environment[CONFIG_OVERRIDE_ENV_VAR] = str(DEFAULT_CONFIG_PATH)
             environment["HATICKETS_RESULT_JSON"] = str(RUN_SUMMARY_PATH)
@@ -382,12 +389,9 @@ class PreflightController:
     def run(self, status: dict[str, Any]) -> tuple[bool, str]:
         if RUN_CONTROLLER.snapshot()["running"]:
             return False, "正式任务运行中，不能抢占手机连接做预热检查。"
-        config = ((status.get("config") or {}).get("effective") or {})
         device = status.get("selected_device") or {}
         if device.get("state") != "device":
             message = "手机未连接，无法预热。"
-        elif config.get("probe_only") or not config.get("if_commit_order"):
-            message = "当前不是正式提交配置，请先确认运行模式。"
         else:
             probe = _probe_page_state(status.get("selected_serial") or "")
             result = probe.get("result") if isinstance(probe, dict) else None
